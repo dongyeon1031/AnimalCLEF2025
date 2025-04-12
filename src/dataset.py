@@ -1,20 +1,14 @@
-from torch.utils.data import Dataset
-from PIL import Image
-import os
+from wildlife_datasets.datasets import AnimalCLEF2025
 
-class AnimalClefDataset(Dataset):
-    def __init__(self, metadata_df, root_dir, transform=None):
-        self.metadata = metadata_df
-        self.root_dir = root_dir
-        self.transform = transform
+'''
+AnimalCLEF2025 로드하고, query/database/calibration 분리까지 담당
+'''
+def load_datasets(root, calibration_size=100):
+    dataset = AnimalCLEF2025(root, load_label=True)
 
-    def __len__(self):
-        return len(self.metadata)
+    dataset_database = dataset.get_subset(dataset.metadata['split'] == 'database')
+    dataset_query = dataset.get_subset(dataset.metadata['split'] == 'query')
 
-    def __getitem__(self, idx):
-        row = self.metadata.iloc[idx]
-        img_path = os.path.join(self.root_dir, row['path'])
-        image = Image.open(img_path).convert("RGB")
-        if self.transform:
-            image = self.transform(image)
-        return image, row['identity'], row['image_id']
+    dataset_calibration = AnimalCLEF2025(root, df=dataset_database.metadata[:calibration_size], load_label=True)
+
+    return dataset, dataset_database, dataset_query, dataset_calibration

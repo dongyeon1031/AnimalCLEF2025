@@ -1,18 +1,31 @@
+# ====================
+# 1. Imports & Utils
+# ====================
 import os
 import numpy as np
 import pandas as pd
-from PIL import Image
-
-import torch
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms as T
 import timm
+import torchvision.transforms as T
 
-# ---------------------- 설정 ----------------------
-ROOT_DIR = 'C:/your/path/to/animal-clef-2025'
-IMAGE_DIR = os.path.join(ROOT_DIR, 'images')
-METADATA_PATH = os.path.join(ROOT_DIR, 'metadata.csv')
+from wildlife_datasets.datasets import AnimalCLEF2025
+from wildlife_tools.features import DeepFeatures
+from wildlife_tools.similarity import CosineSimilarity
+from wildlife_tools.similarity.wildfusion import SimilarityPipeline, WildFusion
+from wildlife_tools.similarity.pairwise.lightglue import MatchLightGlue
+from wildlife_tools.features.local import AlikedExtractor
+from wildlife_tools.similarity.calibration import IsotonicCalibration
+
+def create_sample_submission(dataset_query, predictions, file_name='sample_submission.csv'):
+    df = pd.DataFrame({
+        'image_id': dataset_query.metadata['image_id'],
+        'identity': predictions
+    })
+    df.to_csv(file_name, index=False)
+
+# ====================
+# 2. Transforms
+# ====================
+root = r"C:\Users\user\Desktop\kimdongyeon\CV_proj\animal-clef-2025"
 
 transform_display = T.Compose([
     T.Resize([384, 384]),
@@ -23,104 +36,70 @@ transform = T.Compose([
     T.Normalize(mean=(0.485, 0.456, 0.406),
                 std=(0.229, 0.224, 0.225))
 ])
+transforms_aliked = T.Compose([
+    T.Resize([512, 512]),
+    T.ToTensor()
+])
 
-# ---------------------- Dataset 클래스 ----------------------
-class AnimalClefDataset(Dataset):
-    def __init__(self, metadata_df, root_dir, transform=None):
-        self.metadata = metadata_df
-        self.root_dir = root_dir
-        self.transform = transform
+# ====================
+# 3. Load dataset
+# ====================
+dataset = AnimalCLEF2025(root, load_label=True)
+dataset_database = dataset.get_subset(dataset.metadata['split'] == 'database')
+dataset_query = dataset.get_subset(dataset.metadata['split'] == 'query')
+dataset_calibration = AnimalCLEF2025(root, df=dataset_database.metadata[:100], load_label=True)
+n_query = len(dataset_query)
+print(f"Loaded {len(dataset_database)} database images and {n_query} query images.")
 
-    def __len__(self):
-        return len(self.metadata)
+# ====================
+# 4. Load models & matchers
+# ====================
+name = 'hf-hub:BVRA/MegaDescriptor-L-384'
+model = timm.create_model(name, num_classes=0, pretrained=True)
+device = 'cuda'
 
-    def __getitem__(self, idx):
-        row = self.metadata.iloc[idx]
-        img_path = os.path.join(self.root_dir, row['path'])
-        image = Image.open(img_path).convert("RGB")
+matcher_aliked = SimilarityPipeline(
+    matcher = MatchLightGlue(features='aliked', device=device, batch_size=16),
+    extractor = AlikedExtractor(),
+    transform = transforms_aliked,
+    calibration = IsotonicCalibration()
+)
 
-        if self.transform:
-            image = self.transform(image)
+matcher_mega = SimilarityPipeline(
+    matcher = CosineSimilarity(),
+    extractor = DeepFeatures(model=model, device=device, batch_size=16),
+    transform = transform,
+    calibration = IsotonicCalibration()
+)
 
-        return image, row['identity'], row['image_id']
+# ====================
+# 5. WildFusion calibration
+# ====================
+wildfusion = WildFusion(
+    calibrated_pipelines=[matcher_aliked, matcher_mega],
+    priority_pipeline=matcher_mega
+)
+wildfusion.fit_calibration(dataset_calibration, dataset_calibration)
 
-# ---------------------- Feature 추출 클래스 ----------------------
-class DeepFeatures:
-    def __init__(self, model, device='cuda', batch_size=32, num_workers=0):
-        self.model = model.to(device).eval()
-        self.device = device
-        self.batch_size = batch_size
-        self.num_workers = num_workers
+# ====================
+# 6. Compute similarity
+# ====================
+similarity = wildfusion(dataset_query, dataset_database, B=25)
 
-    def __call__(self, dataset):
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
-        all_features = []
-        image_ids = []
+# ====================
+# 7. Top-1 prediction + threshold
+# ====================
+pred_idx = similarity.argsort(axis=1)[:, -1]
+pred_scores = similarity[np.arange(n_query), pred_idx]
 
-        with torch.no_grad():
-            for images, _, image_id_batch in loader:
-                images = images.to(self.device)
-                feats = self.model(images)
-                feats = F.normalize(feats, dim=-1)
-                all_features.append(feats.cpu())
-                image_ids.extend(image_id_batch)
+new_individual = 'new_individual'
+threshold = 0.6
+labels = dataset_database.labels_string
+predictions = labels[pred_idx].copy()
+predictions[pred_scores < threshold] = new_individual
 
-        all_features = torch.cat(all_features, dim=0)
-        return {'features': all_features, 'image_ids': image_ids}
-
-# wildlife-tools 원본 사용 시 대체 가능
-# from wildlife_tools.features import DeepFeatures as WildlifeDeepFeatures
-# extractor = WildlifeDeepFeatures(model, device=device)
-
-# ---------------------- Cosine Similarity ----------------------
-class CosineSimilarity:
-    def __call__(self, features_query, features_database):
-        q = features_query['features']
-        d = features_database['features']
-        similarity_matrix = q @ d.T
-        return similarity_matrix
-
-# ---------------------- Sample Submission ----------------------
-def create_sample_submission(dataset_query, predictions, file_name='sample_submission.csv'):
-    df = pd.DataFrame({
-        'image_id': dataset_query.metadata['image_id'],
-        'identity': predictions
-    })
-    df.to_csv(file_name, index=False)
-
-# ---------------------- 실행부 ----------------------
-if __name__ == '__main__':
-    metadata = pd.read_csv(METADATA_PATH)
-    metadata['filepath'] = metadata['path']  # 편의상 복사
-
-    database_df = metadata[metadata['split'] == 'database'].copy()
-    query_df = metadata[metadata['split'] == 'query'].copy()
-
-    database_dataset = AnimalClefDataset(database_df, root_dir=ROOT_DIR, transform=transform)
-    query_dataset = AnimalClefDataset(query_df, root_dir=ROOT_DIR, transform=transform)
-
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model_name = 'hf-hub:BVRA/MegaDescriptor-L-384'
-    model = timm.create_model(model_name, num_classes=0, pretrained=True)
-
-    extractor = DeepFeatures(model, device=device, batch_size=32, num_workers=0)
-    features_database = extractor(database_dataset)
-    features_query = extractor(query_dataset)
-
-    similarity = CosineSimilarity()(features_query, features_database)
-
-    n_query = similarity.shape[0]
-    pred_idx = similarity.argsort(dim=1)[:, -1]
-    pred_scores = similarity[torch.arange(n_query), pred_idx]
-
-    labels = database_dataset.metadata['identity'].tolist()
-    predictions = [labels[i] for i in pred_idx.tolist()]
-
-    threshold = 0.6
-    new_individual = 'new_individual'
-    predictions = [
-        pred if score >= threshold else new_individual
-        for pred, score in zip(predictions, pred_scores)
-    ]
-
-    create_sample_submission(query_dataset, predictions, file_name='sample_submission.csv')
+# ====================
+# 8. Save submission
+# ====================
+create_sample_submission(dataset_query, predictions, file_name='sample_submission.csv')
+print("sample_submission.csv saved!")
