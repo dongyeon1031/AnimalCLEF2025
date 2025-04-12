@@ -1,0 +1,16 @@
+# Torch-related
+torch>=1.12.0
+torchvision>=0.13.0
+timm>=0.6.12
+
+# Core scientific stack
+numpy>=1.21
+pandas>=1.3
+scikit-learn>=1.0
+
+# Progress bar
+tqdm
+
+# Git-based installs (wildlife ecosystem)
+git+https://github.com/WildlifeDatasets/wildlife-datasets@develop
+git+https://github.com/WildlifeDatasets/wildlife-tools
