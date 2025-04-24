@@ -21,4 +21,4 @@ MEGAD_NAME = 'hf-hub:BVRA/MegaDescriptor-L-384'
 DEVICE = 'cuda'
 
 # Threshold
-THRESHOLD = 0.6
+THRESHOLD = 0.35

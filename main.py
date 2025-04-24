@@ -10,50 +10,54 @@ import numpy as np
 
 
 def main():
-    # 1. Load datasets
+    # 1. Load the full dataset
     dataset, dataset_db, dataset_query, dataset_calib = load_datasets(ROOT)
-    n_query = len(dataset_query)
 
-    # 2. Load backbone model
+    # 2. Load MegaDescriptor model (global descriptor backbone)
     model = timm.create_model(MEGAD_NAME, num_classes=0, pretrained=True).to(DEVICE)
 
     # 3. Build matchers
     matcher_mega = build_megadescriptor(model=model, transform=transform, device=DEVICE)
     matcher_aliked = build_aliked(transform=transforms_aliked, device=DEVICE)
 
-    # 4. Build WildFusion & calibrate
+    # 4. Build fusion model and apply calibration
     fusion = build_wildfusion(matcher_aliked, matcher_mega, dataset_calib, dataset_calib)
 
-    # 5. Compute calibration similarity
-    calib_similarity = fusion(dataset_calib, dataset_db, B=25)
-    calib_idx = calib_similarity.argsort(axis=1)[:, -1]
-    calib_scores = calib_similarity[np.arange(len(dataset_calib)), calib_idx]
-    calib_labels = dataset_db.labels_string
-    calib_true = dataset_calib.labels_string
+    # 5. Compute predictions per query group (by dataset) but compare against full DB
+    predictions_all = []
+    image_ids_all = []
 
-    # 6. Grid search threshold
-    best_threshold = 0.0
-    best_acc = 0.0
-    for t in np.arange(0.3, 0.91, 0.01):
-        preds = calib_labels[calib_idx].copy()
-        preds[calib_scores < t] = 'new_individual'
-        acc = (preds == calib_true).mean()
-        if acc > best_acc:
-            best_acc = acc
-            best_threshold = t
-    print(f"🔍 Best threshold found: {best_threshold:.2f} (accuracy: {best_acc:.4f})")
+    # 6. Queary의 종별 전략을 다르게 적용해 비교
+    for dataset_name in dataset_query.metadata["dataset"].unique():
+        query_subset = dataset_query.get_subset(dataset_query.metadata["dataset"] == dataset_name)
 
-    # 7. Compute query similarity
-    similarity = fusion(dataset_query, dataset_db, B=25)
-    pred_idx = similarity.argsort(axis=1)[:, -1]
-    pred_scores = similarity[np.arange(n_query), pred_idx]
+        # Apply per-dataset strategy: adjust threshold for LynxID2025
+        threshold = THRESHOLD
+        if dataset_name == "LynxID2025":
+            # 시라소니 전략
+            threshold = 0.35
+        elif dataset_name == "SeaTurtleID2022":
+            # 바다거북 전략
+            threshold = 0.35
+        elif dataset_name == "SalamanderID2025":
+            # 도롱뇽 전략
+            threshold = 0.35
 
-    labels = dataset_db.labels_string
-    predictions = labels[pred_idx].copy()
-    predictions[pred_scores < best_threshold] = 'new_individual'
+        similarity = fusion(query_subset, dataset_db, B=25)
+        pred_idx = similarity.argsort(axis=1)[:, -1]
+        pred_scores = similarity[np.arange(len(query_subset)), pred_idx]
 
-    # 8. Save
-    create_sample_submission(dataset_query, predictions)
+        labels = dataset_db.labels_string
+        predictions = labels[pred_idx].copy()
+        predictions[pred_scores < threshold] = 'new_individual'
+
+        predictions_all.extend(predictions)
+        image_ids_all.extend(query_subset.metadata["image_id"])
+
+    # 7. Save to CSV
+    import pandas as pd
+    df = pd.DataFrame({"image_id": image_ids_all, "identity": predictions_all})
+    df.to_csv("sample_submission.csv", index=False)
     print("✅ sample_submission.csv saved!")
 
 
