@@ -100,6 +100,8 @@ def run_preprocessing():
 
 def main():
     # 1. Load the full dataset
+    if not os.path.exists(PROCESSED_DIR):
+        run_preprocessing()
     dataset, dataset_db, dataset_query, dataset_calib = load_datasets(ROOT)
 
     # 2. Load MegaDescriptor model (global descriptor backbone)
