@@ -28,18 +28,19 @@ def build_aliked(transform, device='cuda', batch_size=16):
 # --- CLIP ViT‑L/14 matcher ---------------------------------
 from open_clip import create_model_and_transforms
 
-def build_clip(transform, device='cuda', batch_size=16):
+def build_clip(device='cuda', batch_size=16):
     """
     Build a SimilarityPipeline using CLIP ViT‑L/14 visual encoder
     as a global descriptor (DeepFeatures + Cosine).
+    The CLIP package already provides the right preprocessing transform.
     """
-    model, _, _ = create_model_and_transforms('ViT-L-14', pretrained='openai')
-    model = model.visual  # use image branch only
+    model, _, preprocess = create_model_and_transforms('ViT-L-14', pretrained='openai')
+    model = model.visual  # image branch
     model = model.to(device).eval()
 
     return SimilarityPipeline(
         matcher=CosineSimilarity(),
         extractor=DeepFeatures(model=model, device=device, batch_size=batch_size),
-        transform=transform,
+        transform=preprocess,          # PIL -> tensor transform supplied by open_clip
         calibration=IsotonicCalibration()
     )

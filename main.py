@@ -19,7 +19,7 @@ def main():
     # 3. Build matchers
     matcher_mega = build_megadescriptor(model=model, transform=transform, device=DEVICE)
     matcher_aliked = build_aliked(transform=transforms_aliked, device=DEVICE)
-    matcher_clip = build_clip(transform=transform_display, device=DEVICE)
+    matcher_clip = build_clip(device=DEVICE)
 
     # 4. Build fusion model and apply calibration
     fusion = build_wildfusion(
@@ -53,7 +53,7 @@ def main():
 
         labels = dataset_db.labels_string
         predictions = labels[top_idx].copy()
-        predictions[(p_top1 < thr) | (gap < 0.03)] = "new_individual"
+        predictions[(p_top1 < thr)] = "new_individual"
 
         predictions_all.extend(predictions)
         image_ids_all.extend(query_subset.metadata["image_id"])
