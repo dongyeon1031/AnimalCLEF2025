@@ -18,7 +18,7 @@ def salamander_orientation_transform(image, metadata):
         # 'top' orientation needs no change
     return image
 
-def load_datasets(root, calibration_size=100):
+def load_datasets(root, calibration_size=1000):
     # Apply rotation transform for SalamanderID2025 samples during dataset loading
     dataset = AnimalCLEF2025(root, load_label=True, transform=salamander_orientation_transform)
 
@@ -41,7 +41,7 @@ def load_datasets(root, calibration_size=100):
 
 
 # Return database and query datasets split by species
-def load_datasets_by_species(root, calibration_size=100):
+def load_datasets_by_species(root, calibration_size=1000):
     dataset = AnimalCLEF2025(root, load_label=True)
 
     species_groups = {}

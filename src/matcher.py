@@ -16,7 +16,7 @@ def build_megadescriptor(model, transform, device='cuda', batch_size=16):
         calibration=IsotonicCalibration()
     )
 
-
+# --- ALIKED matcher ---------------------------------
 def build_aliked(transform, device='cuda', batch_size=16):
     return SimilarityPipeline(
         matcher=MatchLightGlue(features='aliked', device=device, batch_size=batch_size),
@@ -26,21 +26,30 @@ def build_aliked(transform, device='cuda', batch_size=16):
     )
 
 # --- CLIP ViT‑L/14 matcher ---------------------------------
-from open_clip import create_model_and_transforms
+try:
+    from open_clip import create_model_and_transforms
+except ImportError:
+    create_model_and_transforms = None  # handled in build_clip
 
-def build_clip(device='cuda', batch_size=16):
+def build_clip(device='cuda', batch_size=16, transform=None):
     """
-    Build a SimilarityPipeline using CLIP ViT‑L/14 visual encoder
-    as a global descriptor (DeepFeatures + Cosine).
-    The CLIP package already provides the right preprocessing transform.
+    Build a SimilarityPipeline using CLIP ViT‑L/14 image encoder
+    (OpenAI weights) as a global descriptor.
+    Requires `open_clip_torch` package.
     """
-    model, _, preprocess = create_model_and_transforms('ViT-L-14', pretrained='openai')
-    model = model.visual  # image branch
-    model = model.to(device).eval()
+    if create_model_and_transforms is None:
+        raise ImportError("open_clip_torch is not installed. "
+                          "Install with `pip install open_clip_torch`.")
+
+    model, _, preprocess = create_model_and_transforms(
+        'EVA02-L-14-336',         # valid 336‑px EVA02 model
+        pretrained='merged2b_s6b_b61k'   # available weight tag
+    )
+    model = model.visual.to(device).eval()
 
     return SimilarityPipeline(
         matcher=CosineSimilarity(),
         extractor=DeepFeatures(model=model, device=device, batch_size=batch_size),
-        transform=preprocess,          # PIL -> tensor transform supplied by open_clip
+        transform=(transform or preprocess),
         calibration=IsotonicCalibration()
     )
