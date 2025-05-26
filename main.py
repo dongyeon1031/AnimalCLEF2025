@@ -1,9 +1,9 @@
 from config import ROOT, MEGAD_NAME, DEVICE, THRESHOLD
-from src.transforms import transforms_aliked, transform_loftr, transform_tta_mega
+from src.transforms import transforms_aliked, transform_tta_mega
 from src.utils import create_sample_submission
 from src.dataset import load_datasets
 from src.fusion import build_wildfusion
-from src.matcher import build_megadescriptor, build_aliked, build_loftr, build_eva02
+from src.matcher import build_megadescriptor, build_aliked, build_eva02
 from src.fusion_head import FusionMLP
 
 import timm
@@ -20,20 +20,21 @@ def main():
     # 3. Build matchers
     matcher_mega = build_megadescriptor(model=model, transform=transform_tta_mega, device=DEVICE)
     matcher_aliked = build_aliked(transform=transforms_aliked, device=DEVICE)
-    matcher_loftr = build_loftr(transform=transform_loftr, device=DEVICE)
 
 
     # 4. Build fusion model and apply calibration
     fusion = build_wildfusion(
         dataset_calib, dataset_calib,
-        matcher_aliked, matcher_loftr, matcher_mega,
+        matcher_aliked, matcher_mega,
         priority_pipeline=matcher_mega
     )
 
     matcher_eva = build_eva02(device=DEVICE)
     fusion_head = FusionMLP().to(DEVICE)   # 랜덤 초기화 (미학습)
 
-    emb_db_eva = matcher_eva.extractor(dataset_db)   # (N, 768)
+    dataset_db_eva = dataset_db.get_subset(slice(None))
+    dataset_db_eva.transform = matcher_eva.transform   # 1-arg transform
+    emb_db_eva = matcher_eva.extractor(dataset_db_eva)
     emb_db_eva = emb_db_eva / np.linalg.norm(emb_db_eva, axis=1, keepdims=True)
 
     # 5. Compute predictions per query group (by dataset) but compare against full DB
