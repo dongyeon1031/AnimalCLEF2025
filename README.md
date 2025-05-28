@@ -8,6 +8,8 @@
 
 **BiTAmin CV Project**는 다양한 동물 종(시라소니, 바다거북, 도롱뇽 등)의 개체를 식별하는 **야생동물 재식별 (Re-ID)** 문제를 해결하기 위한 프로젝트입니다.  
 
+본 시스템은 **CVPR 2025 - FGVC10 Workshop**에서 개최된 **AnimalCLEF25 / LifeCLEF Wild Animal Re-Identification Challenge**에 출전하기 위해 개발되었습니다.
+
 고유한 개체 식별을 위해 **복수의 글로벌 및 로컬 디스크립터**를 활용하고, 이를 **Feature Fusion + Calibration + Thresholding** 방식으로 통합하여 최종 예측을 수행합니다.
 
 ---
