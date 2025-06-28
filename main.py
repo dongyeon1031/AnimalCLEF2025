@@ -5,12 +5,14 @@ from src.dataset import load_datasets
 from src.fusion import build_wildfusion
 from src.matcher import build_megadescriptor, build_aliked, build_eva02
 from src.fusion_head import FusionMLP
+from src.utils import set_seed
 
 import timm
 import numpy as np
 
 
 def main():
+    set_seed(42)
     # 1. Load the full dataset
     dataset, dataset_db, dataset_query, dataset_calib = load_datasets(ROOT, calibration_size=1000)
 
