@@ -2,22 +2,16 @@ import os
 
 # Dataset root path
 '''
-    여기 각자 로컬에서 실행할 경로로 수정해서 넣고, 푸쉬할 땐 코멘트처리 해줘!
+    define your root directory
 '''
-# 동연 로컬 경로
-# ROOT = r"C:\Users\user\Desktop\kimdongyeon\CV_proj\bitamin_cv_proj\animal-clef-2025"
-# 보희 로컬 경로
-
-# 수아 로컬 경로
-
-# 채연 로컬 경로
-
-# 한준 로컬 경로
+ROOT = '.'
 
  
 
 # Model settings
 MEGAD_NAME = 'hf-hub:BVRA/MegaDescriptor-L-384'
+EVA_NAME = 'EVA02-L-14-336'
+EVA_WEIGHT_NAME = 'merged2b_s6b_b61k'
 DEVICE = 'cuda'
 
 # Threshold

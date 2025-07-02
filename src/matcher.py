@@ -1,3 +1,4 @@
+from config import EVA_NAME, EVA_WEIGHT_NAME
 from wildlife_tools.similarity import CosineSimilarity
 from wildlife_tools.similarity.pairwise.lightglue import MatchLightGlue
 from wildlife_tools.similarity.wildfusion import SimilarityPipeline
@@ -40,8 +41,8 @@ def build_eva02(device='cuda', batch_size=16):
         raise ImportError("open_clip_torch not installed. pip install open_clip_torch")
 
     model, _, preprocess = create_model_and_transforms(
-        'EVA02-L-14-336',
-        pretrained='merged2b_s6b_b61k'
+        EVA_NAME,
+        pretrained=EVA_WEIGHT_NAME
     )
     model = model.visual.to(device).eval()
 
