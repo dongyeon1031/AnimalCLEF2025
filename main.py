@@ -1,6 +1,5 @@
 from config import ROOT, MEGAD_NAME, DEVICE, THRESHOLD
 from src.transforms import transforms_aliked, transform_tta_mega
-from src.utils import create_sample_submission
 from src.dataset import load_datasets
 from src.fusion import build_wildfusion
 from src.matcher import build_megadescriptor, build_aliked, build_eva02

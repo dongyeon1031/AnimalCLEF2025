@@ -78,3 +78,27 @@ AnimalCLEF2025/
 ├── assets/
 │   └── pipeline.png         # Pipeline diagram
 ```
+
+---
+
+## 🔧 How to Run
+
+1. Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+2. Set up Kaggle API (download `kaggle.json` from [your Kaggle account settings](https://www.kaggle.com/settings) and place it in `~/.kaggle/`):
+
+```bash
+mkdir -p ~/.kaggle
+mv ~/Downloads/kaggle.json ~/.kaggle/
+chmod 600 ~/.kaggle/kaggle.json
+```
+
+3. Run the main script:
+
+```bash
+python main.py
+```

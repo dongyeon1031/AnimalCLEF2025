@@ -19,6 +19,7 @@ def salamander_orientation_transform(image, metadata):
     return image
 
 def load_datasets(root, calibration_size=1000):
+    AnimalCLEF2025.get_data(root)
     # Apply rotation transform for SalamanderID2025 samples during dataset loading
     dataset = AnimalCLEF2025(root, load_label=True, transform=salamander_orientation_transform)
 

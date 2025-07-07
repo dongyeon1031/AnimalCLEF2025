@@ -4,7 +4,7 @@ import os
 '''
     define your root directory
 '''
-ROOT = '.'
+ROOT = './dataset'
 
  
 
