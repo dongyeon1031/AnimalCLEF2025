@@ -1,5 +1,7 @@
 # 🐾 Wild Animal Re-Identification
 
+You can find the full paper about this project [here](https://www.dei.unipd.it/~faggioli/temp/clef2025/paper_245.pdf).
+
 ![pipeline](./assets/pipline.jpg)
 
 ---
