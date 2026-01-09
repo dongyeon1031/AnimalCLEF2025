@@ -2,7 +2,7 @@ from config import ROOT, MEGAD_NAME, DEVICE, THRESHOLD
 from src.transforms import transforms_aliked, transform_tta_mega
 from src.dataset import load_datasets
 from src.fusion import build_wildfusion
-from src.matcher import build_megadescriptor, build_aliked, build_eva02
+from src.matcher import build_megadescriptor, build_aliked, build_eva02, build_dinov3
 from src.fusion_head import FusionMLP
 from src.utils import set_seed
 
@@ -38,6 +38,13 @@ def main():
     emb_db_eva = matcher_eva.extractor(dataset_db_eva)
     emb_db_eva = emb_db_eva / np.linalg.norm(emb_db_eva, axis=1, keepdims=True)
 
+    matcher_dino = build_dinov3(device=DEVICE)
+
+    dataset_db_dino = dataset_db.get_subset(slice(None))
+    dataset_db_dino.transform = matcher_dino.transform   # 1-arg transform
+    emb_db_dino = matcher_dino.extractor(dataset_db_dino)
+    emb_db_dino = emb_db_dino / np.linalg.norm(emb_db_dino, axis=1, keepdims=True)
+
     # 5. Compute predictions per query group (by dataset) but compare against full DB
     predictions_all = []
     image_ids_all = []
@@ -55,8 +62,14 @@ def main():
         emb_q_eva = emb_q_eva / np.linalg.norm(emb_q_eva, axis=1, keepdims=True)
         sim_eva = emb_q_eva @ emb_db_eva.T
 
-        # 3) 가중 평균 (또는 향후 MLP)
-        combined_sim = 0.5 * sim_fusion + 0.5 * sim_eva   # α=0.5 임시
+        # 3) DINOv3 cosine similarity
+        emb_q_dino = matcher_dino.extractor(query_subset)
+        emb_q_dino = emb_q_dino / np.linalg.norm(emb_q_dino, axis=1, keepdims=True)
+        sim_dino = emb_q_dino @ emb_db_dino.T
+
+        # 4) 가중 평균 (또는 향후 MLP)
+        # 임시 가중치: fusion을 메인으로 두고, EVA02/DINOv3를 보조 prior로 사용
+        combined_sim = 0.6 * sim_fusion + 0.2 * sim_eva + 0.2 * sim_dino
 
         # --- 이후 모든 idx / score 계산을 combined_sim 기준으로 ---
         idx_sorted = combined_sim.argsort(axis=1)
@@ -69,8 +82,9 @@ def main():
 
         # adaptive threshold: global + small offset
         base_th = THRESHOLD
-        offsets = {"SeaTurtleID2022": -0.02, "SalamanderID2025": +0.02}
-        thr = base_th + offsets.get(dataset_name, 0.0)
+        # offsets = {"SeaTurtleID2022": -0.02, "SalamanderID2025": +0.02}
+        # thr = base_th + offsets.get(dataset_name, 0.0)
+        thr = base_th
 
         labels = dataset_db.labels_string
         predictions = labels[top_idx].copy()

@@ -5,6 +5,8 @@ from wildlife_tools.similarity.wildfusion import SimilarityPipeline
 from wildlife_tools.features import DeepFeatures
 from wildlife_tools.features.local import AlikedExtractor
 from wildlife_tools.similarity.calibration import IsotonicCalibration
+import torch
+import torchvision
 
 '''
 MegaDescriptor, ALIKED matcher 각각 생성 + return
@@ -53,5 +55,46 @@ def build_eva02(device='cuda', batch_size=16):
         matcher=CosineSimilarity(),
         extractor=DeepFeatures(model, device=device, batch_size=batch_size),
         transform=eva_transform,
+        calibration=IsotonicCalibration()
+    )
+
+# --- DinoV3 matcher -----------------------------------
+def build_dinov3(device='cuda', batch_size=16):
+    # 1) model load (torch.hub 사용해서 로드)
+    model = torch.hub.load("facebookresearch/dinov3", "dinov3_vits14")
+    model = model.to(device).eval()
+
+    # 2) DINOv3 output wrapper: dict -> (B, D)
+    class DinoV3Embedder(torch.nn.Module):
+        def __init__(self, backbone):
+            super().__init__()
+            self.backbone = backbone
+
+        def forward(self, x):   # 여기 검증하기
+            out = self.backbone(x)
+            # DINOv3가 dict를 내는 케이스 대응
+            if isinstance(out, dict):
+                # 가장 흔한 전역 임베딩 키
+                return out["x_norm_clstoken"]
+            return out  # 이미 (B, D)면 그대로
+
+    model = DinoV3Embedder(model).to(device).eval()
+
+    # 3) preprocess (이미지넷 스타일 씀)
+    preprocess = torchvision.transforms.Compose([
+        torchvision.transforms.Resize(256),
+        torchvision.transforms.CenterCrop(224),
+        torchvision.transforms.ToTensor(),
+        torchvision.transforms.Normalize(mean=(0.485, 0.456, 0.406),
+                                         std=(0.229, 0.224, 0.225)),
+    ])
+
+    def dino_transform(img, metadata=None):
+        return preprocess(img)
+
+    return SimilarityPipeline(
+        matcher=CosineSimilarity(),
+        extractor=DeepFeatures(model=model, device=device, batch_size=batch_size),
+        transform=dino_transform,
         calibration=IsotonicCalibration()
     )
