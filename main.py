@@ -51,7 +51,7 @@ def main():
 
     # 6. Queary의 종별 전략을 다르게 적용해 비교
     for dataset_name in dataset_query.metadata["dataset"].unique():
-        query_subset = dataset_query.get_subset(  # ★ 먼저 정의
+        query_subset = dataset_query.get_subset(
             dataset_query.metadata["dataset"] == dataset_name)
 
         # 1) WildFusion similarity (Mega+ALIKED+LoFTR)
@@ -62,14 +62,15 @@ def main():
         emb_q_eva = emb_q_eva / np.linalg.norm(emb_q_eva, axis=1, keepdims=True)
         sim_eva = emb_q_eva @ emb_db_eva.T
 
-        # 3) DINOv3 cosine similarity
-        emb_q_dino = matcher_dino.extractor(query_subset)
-        emb_q_dino = emb_q_dino / np.linalg.norm(emb_q_dino, axis=1, keepdims=True)
-        sim_dino = emb_q_dino @ emb_db_dino.T
+        # # 3) DINOv3 cosine similarity
+        # emb_q_dino = matcher_dino.extractor(query_subset)
+        # emb_q_dino = emb_q_dino / np.linalg.norm(emb_q_dino, axis=1, keepdims=True)
+        # sim_dino = emb_q_dino @ emb_db_dino.T
 
         # 4) 가중 평균 (또는 향후 MLP)
         # 임시 가중치: fusion을 메인으로 두고, EVA02/DINOv3를 보조 prior로 사용
-        combined_sim = 0.6 * sim_fusion + 0.2 * sim_eva + 0.2 * sim_dino
+        # combined_sim = 0.6 * sim_fusion + 0.2 * sim_eva + 0.2 * sim_dino
+        combined_sim = sim_fusion
 
         # --- 이후 모든 idx / score 계산을 combined_sim 기준으로 ---
         idx_sorted = combined_sim.argsort(axis=1)
