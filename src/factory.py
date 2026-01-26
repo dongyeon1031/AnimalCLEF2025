@@ -51,7 +51,7 @@ def build_aliked(transform=None, device='cuda', batch_size=16):
 # ---------------------------------------------------------
 # 3. EVA02 빌더 (CLIP based Global)
 # ---------------------------------------------------------
-def build_eva02(device='cuda', batch_size=16):
+def build_eva02(device='cuda', batch_size=64):
     try:
         from open_clip import create_model_and_transforms
     except ImportError:
@@ -64,17 +64,12 @@ def build_eva02(device='cuda', batch_size=16):
     )
     model = model.visual.to(device).eval()
 
-    # EVA02 전용 Transform 래퍼
-    def eva_transform(img):
-        return preprocess(img)
-
     scorer = FeatureBasedScorer(
-        extractor=DeepFeatures(model, device=device, batch_size=batch_size),
-        similarity_metric=CosineSimilarity()
-    )
+            extractor=DeepFeatures(model=model, device=device, batch_size=batch_size),
+            similarity_metric=CosineSimilarity()
+        )
     
-    # EVA02는 별도의 Transform 객체를 반환해서 데이터셋에 적용할 수 있게 해줌
     pipeline = UniversalPipeline(scorer, IsotonicCalibrator())
-    pipeline.transform = eva_transform  # 편의를 위해 속성 추가
+    pipeline.transform = preprocess
     
     return pipeline
