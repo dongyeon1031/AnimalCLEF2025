@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import torch
 import timm
+import os
 
 from config import ROOT, MEGAD_NAME, DEVICE, THRESHOLD
 from src.dataset import load_datasets
@@ -166,10 +167,21 @@ def main():
         image_ids_all.extend(query_subset.metadata["image_id"])
 
     # 7. Save to CSV
-    import pandas as pd
+    base_filename = "result"
+    extension = ".csv"
+    counter = 1
+
+    # 파일명이 중복되지 않을 때까지 숫자 증가
+    while True:
+        filename = f"{base_filename}_{counter}{extension}"
+        if not os.path.exists(filename):
+            break
+        counter += 1
+
+    # 저장
     df = pd.DataFrame({"image_id": image_ids_all, "identity": predictions_all})
-    df.to_csv("sample_submission.csv", index=False)
-    print("✅ sample_submission.csv saved!")
+    df.to_csv(filename, index=False)
+    print(f"✅ Submission saved to: {filename}")
 
 if __name__ == '__main__':
     from multiprocessing import freeze_support
