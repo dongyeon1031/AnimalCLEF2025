@@ -15,4 +15,4 @@ EVA_WEIGHT_NAME = 'merged2b_s6b_b61k'
 DEVICE = 'cuda'
 
 # Threshold
-THRESHOLD = 0.35
+THRESHOLD = 0.5
