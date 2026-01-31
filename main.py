@@ -9,6 +9,8 @@ from src.utils import set_seed
 from src.transforms import transform_tta_mega, transforms_aliked
 
 from src.factory import build_megadescriptor, build_aliked, build_eva02
+from src.calibrators import XGBoostCalibrator
+from src.base import UniversalPipeline
 
 def main():
     set_seed(42)
@@ -34,13 +36,25 @@ def main():
     model_mega = timm.create_model(MEGAD_NAME, num_classes=0, pretrained=True).to(DEVICE)
     pipeline_mega = build_megadescriptor(model=model_mega, transform=transform_tta_mega, device=DEVICE)
 
+    # Mega 전용 XGBoost 생성
+    calibrator_mega = XGBoostCalibrator() 
+    pipeline_mega = UniversalPipeline(scorer=base_mega.scorer, calibrator=calibrator_mega)
+
     # (2) ALIKED Pipeline
     print(f" - ALIKED (Local Features)")
     pipeline_aliked = build_aliked(transform=transforms_aliked, device=DEVICE)
 
+    # ALIKED 전용 XGBoost 생성
+    calibrator_aliked = XGBoostCalibrator()
+    pipeline_aliked = UniversalPipeline(scorer=base_aliked.scorer, calibrator=calibrator_aliked)
+
     # (3) EVA02 Pipeline
     print(f" - EVA02 (Global Features)")
     pipeline_eva = build_eva02(device=DEVICE)
+
+    # EVA02 전용 XGBoost 생성
+    calibrator_eva = XGBoostCalibrator()
+    pipeline_eva = UniversalPipeline(scorer=base_eva.scorer, calibrator=calibrator_eva)
 
 
     # ---------------------------------------------------------
@@ -49,16 +63,19 @@ def main():
     print("[Main] Starting calibration...")
 
     # (1) Mega Calibration
+    print(" -> Training Mega-XGBoost...")
     calib_mega = dataset_calib.get_subset(calib_mask)
     calib_mega.transform = transform_tta_mega
     pipeline_mega.fit_calibration(calib_mega, calib_mega)
 
     # (2) ALIKED Calibration
+    print(" -> Training ALIKED-XGBoost...")
     calib_aliked = dataset_calib.get_subset(calib_mask)
     calib_aliked.transform = transforms_aliked
     pipeline_aliked.fit_calibration(calib_aliked, calib_aliked)
 
     # (3) EVA02 Calibration
+    print(" -> Training EVA-XGBoost...")
     calib_eva = dataset_calib.get_subset(calib_mask)
     calib_eva.transform = pipeline_eva.transform
     pipeline_eva.fit_calibration(calib_eva, calib_eva)
@@ -98,7 +115,7 @@ def main():
         query_mega.transform = transform_tta_mega
         
         # 점수 계산
-        scores_mega = pipeline_mega(query_mega, db_mega)
+        probs_mega = pipeline_mega(query_mega, db_mega)
 
 
         # -----------------------------------------------------
@@ -106,7 +123,7 @@ def main():
         # -----------------------------------------------------
         # Mega 점수 기준 Top-K 선정
         B = 25
-        topk_vals, topk_indices = torch.topk(torch.from_numpy(scores_mega), k=min(B, scores_mega.shape[1]), dim=1)
+        topk_vals, topk_indices = torch.topk(torch.from_numpy(probs_mega), k=min(B, probs_mega.shape[1]), dim=1)
         
         pairs = []
         rows = np.arange(len(query_subset))
@@ -117,22 +134,23 @@ def main():
         query_aliked = query_subset.get_subset(subset_full_mask)
         query_aliked.transform = transforms_aliked
         
-        # 선택된 Pair에 대해서만 ALIKED 점수 계산
-        scores_aliked_sparse = pipeline_aliked(query_aliked, db_aliked, pairs=pairs)
+        # ALIKED도 이제 '확률'을 반환합니다.
+        probs_aliked_sparse = pipeline_aliked(query_aliked, db_aliked, pairs=pairs)
         
-        scores_aliked_full = np.full_like(scores_mega, -np.inf)
+        # 전체 행렬 만들기 (기본값은 0, 즉 확률 0%로 설정)
+        probs_aliked_full = np.zeros_like(probs_mega)
         
-        if scores_aliked_sparse.ndim == 1:
+        if probs_aliked_sparse.ndim == 1:
             q_idxs = [p[0] for p in pairs]
             db_idxs = [p[1] for p in pairs]
-            scores_aliked_full[q_idxs, db_idxs] = scores_aliked_sparse
+            probs_aliked_full[q_idxs, db_idxs] = probs_aliked_sparse
         else:
-            scores_aliked_full = scores_aliked_sparse
+            probs_aliked_full = probs_aliked_sparse
 
         # Fusion: Mega + ALIKED
-        scores_fusion = scores_mega.copy()
-        valid_mask = (scores_aliked_full > -999)
-        scores_fusion[valid_mask] = (scores_mega[valid_mask] + scores_aliked_full[valid_mask]) / 2
+        probs_fusion = probs_mega.copy()
+        valid_mask = (probs_aliked_full > 0)
+        probs_fusion[valid_mask] = (probs_mega[valid_mask] + probs_aliked_full[valid_mask]) / 2
 
 
         # -----------------------------------------------------
@@ -141,21 +159,21 @@ def main():
         query_eva = query_subset.get_subset(subset_full_mask)
         query_eva.transform = pipeline_eva.transform
         
-        scores_eva = pipeline_eva(query_eva, db_eva)
+        probs_eva = pipeline_eva(query_eva, db_eva)
 
 
         # -----------------------------------------------------
         # Step D: Final Ensemble
         # -----------------------------------------------------
-        final_scores = 0.5 * scores_fusion + 0.5 * scores_eva
+        final_probs = 0.5 * probs_fusion + 0.5 * probs_eva
         
         
         # -----------------------------------------------------
         # Step E: Prediction & Thresholding
         # -----------------------------------------------------
-        idx_sorted = final_scores.argsort(axis=1)
+        idx_sorted = final_probs.argsort(axis=1)
         top_idx = idx_sorted[:, -1]
-        p_top1 = final_scores[np.arange(len(query_subset)), top_idx]
+        p_top1 = final_probs[np.arange(len(query_subset)), top_idx]
 
         thr = THRESHOLD
         
@@ -168,8 +186,8 @@ def main():
     # 7. Save to CSV
     import pandas as pd
     df = pd.DataFrame({"image_id": image_ids_all, "identity": predictions_all})
-    df.to_csv("sample_submission.csv", index=False)
-    print("✅ sample_submission.csv saved!")
+    df.to_csv("submission_all_xgboost.csv", index=False)
+    print("✅ All models + XGBoost experiment finished! Saved to submission_all_xgboost.csv")
 
 if __name__ == '__main__':
     from multiprocessing import freeze_support
