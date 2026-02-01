@@ -34,27 +34,30 @@ def main():
     # (1) MegaDescriptor Pipeline
     print(f" - MegaDescriptor ({MEGAD_NAME})")
     model_mega = timm.create_model(MEGAD_NAME, num_classes=0, pretrained=True).to(DEVICE)
-    pipeline_mega = build_megadescriptor(model=model_mega, transform=transform_tta_mega, device=DEVICE)
+    base_mega = build_megadescriptor(model=model_mega, transform=transform_tta_mega, device=DEVICE)
 
     # Mega 전용 XGBoost 생성
     calibrator_mega = XGBoostCalibrator() 
     pipeline_mega = UniversalPipeline(scorer=base_mega.scorer, calibrator=calibrator_mega)
+    pipeline_mega.transform = transform_tta_mega  # (아래에서 pipeline_mega.transform 쓰는 경우 대비)
 
     # (2) ALIKED Pipeline
     print(f" - ALIKED (Local Features)")
-    pipeline_aliked = build_aliked(transform=transforms_aliked, device=DEVICE)
+    base_aliked = build_aliked(transform=transforms_aliked, device=DEVICE)
 
     # ALIKED 전용 XGBoost 생성
     calibrator_aliked = XGBoostCalibrator()
     pipeline_aliked = UniversalPipeline(scorer=base_aliked.scorer, calibrator=calibrator_aliked)
+    pipeline_aliked.transform = transforms_aliked
 
     # (3) EVA02 Pipeline
     print(f" - EVA02 (Global Features)")
-    pipeline_eva = build_eva02(device=DEVICE)
+    base_eva = build_eva02(device=DEVICE)
 
     # EVA02 전용 XGBoost 생성
     calibrator_eva = XGBoostCalibrator()
     pipeline_eva = UniversalPipeline(scorer=base_eva.scorer, calibrator=calibrator_eva)
+    pipeline_eva.transform = base_eva.transform  # eva는 base에서 transform 가져오는 게 안전
 
 
     # ---------------------------------------------------------
