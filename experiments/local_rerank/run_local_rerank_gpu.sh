@@ -25,6 +25,8 @@ RESULTS_DIR="${RESULTS_DIR:-experiments/local_rerank/results}"
 RUN_PREFIX="${RUN_PREFIX:-local_rerank_gpu}"
 VIS_PER_DATASET="${VIS_PER_DATASET:-3}"
 VIS_MAX_MATCHES="${VIS_MAX_MATCHES:-120}"
+BATCH_SIZE="${BATCH_SIZE:-64}"
+LOFTR_BATCH_SIZE="${LOFTR_BATCH_SIZE:-4}"
 
 MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/mpl}"
 XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp}"
@@ -61,11 +63,16 @@ echo "[Run] python=${PYTHON_BIN}, data_root=${DATA_ROOT}, device=cuda, matchers=
 failed=()
 for m in "${MATCHER_LIST[@]}"; do
   run_prefix_for_matcher="${RUN_PREFIX}_${m}"
-  echo "[Run] matcher=${m}, run_prefix=${run_prefix_for_matcher}"
+  batch_size_for_matcher="${BATCH_SIZE}"
+  if [[ "${m}" == "loftr" ]]; then
+    batch_size_for_matcher="${LOFTR_BATCH_SIZE}"
+  fi
+  echo "[Run] matcher=${m}, run_prefix=${run_prefix_for_matcher}, batch_size=${batch_size_for_matcher}"
   if "${PYTHON_BIN}" experiments/local_rerank/run_local_rerank.py \
     --root "${DATA_ROOT}" \
     --matcher "${m}" \
     --device cuda \
+    --batch-size "${batch_size_for_matcher}" \
     --candidate-size "${CANDIDATE_SIZE}" \
     --trials-per-query "${TRIALS_PER_QUERY}" \
     --results-dir "${RESULTS_DIR}" \

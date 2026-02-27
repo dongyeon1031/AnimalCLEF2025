@@ -44,6 +44,10 @@ Visualization env vars:
 - `VIS_PER_DATASET` (default: `3`, set `0` to disable)
 - `VIS_MAX_MATCHES` (default: `120`)
 
+Batch-size env vars:
+- `BATCH_SIZE` (default: `64`, used for non-LoFTR matchers)
+- `LOFTR_BATCH_SIZE` (default: `4`, used only for `loftr` to avoid OOM)
+
 If `query` labels in `metadata.csv` do not overlap with `database` labels
 (common in challenge test metadata), the script automatically falls back to
 `db_self_eval` mode in `--query-source auto`.
