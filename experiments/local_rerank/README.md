@@ -22,11 +22,18 @@ experiments/local_rerank/run_local_rerank_gpu.sh /path/to/animal-clef-2025
 ```
 
 You can override defaults with env vars:
-- `MATCHER` (default: `aliked`)
+- `MATCHERS` (space-separated list, e.g. `"aliked loftr orb"`)
+- `MATCHER` (single matcher; used only when `MATCHERS` is empty)
 - `CANDIDATE_SIZE` (default: `25`)
 - `TRIALS_PER_QUERY` (default: `1`)
 - `RESULTS_DIR`
 - `RUN_PREFIX`
+
+Default behavior:
+- If neither `MATCHERS` nor `MATCHER` is set, `run_local_rerank_gpu.sh` runs all:
+  `aliked`, `loftr`, `orb`
+- Each matcher uses its own prefix: `${RUN_PREFIX}_<matcher>`
+  so CSV/JSON are saved separately.
 
 If `query` labels in `metadata.csv` do not overlap with `database` labels
 (common in challenge test metadata), the script automatically falls back to
