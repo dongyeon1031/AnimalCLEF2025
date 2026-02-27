@@ -23,6 +23,8 @@ CANDIDATE_SIZE="${CANDIDATE_SIZE:-25}"
 TRIALS_PER_QUERY="${TRIALS_PER_QUERY:-1}"
 RESULTS_DIR="${RESULTS_DIR:-experiments/local_rerank/results}"
 RUN_PREFIX="${RUN_PREFIX:-local_rerank_gpu}"
+VIS_PER_DATASET="${VIS_PER_DATASET:-3}"
+VIS_MAX_MATCHES="${VIS_MAX_MATCHES:-120}"
 
 MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/mpl}"
 XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp}"
@@ -68,6 +70,8 @@ for m in "${MATCHER_LIST[@]}"; do
     --trials-per-query "${TRIALS_PER_QUERY}" \
     --results-dir "${RESULTS_DIR}" \
     --run-prefix "${run_prefix_for_matcher}" \
+    --visualize-per-dataset "${VIS_PER_DATASET}" \
+    --visualize-max-matches "${VIS_MAX_MATCHES}" \
     "$@"; then
     echo "[Done] matcher=${m}"
   else

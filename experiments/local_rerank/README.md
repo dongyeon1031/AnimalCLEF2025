@@ -34,6 +34,14 @@ Default behavior:
   `aliked`, `loftr`, `orb`
 - Each matcher uses its own prefix: `${RUN_PREFIX}_<matcher>`
   so CSV/JSON are saved separately.
+- Match-point visualization is enabled by default with:
+  `VIS_PER_DATASET=3` (up to 3 good + 3 bad per dataset/species).
+  Files are saved under:
+  `experiments/local_rerank/results/visualizations/<run_prefix>_<matcher>/`
+
+Visualization env vars:
+- `VIS_PER_DATASET` (default: `3`, set `0` to disable)
+- `VIS_MAX_MATCHES` (default: `120`)
 
 If `query` labels in `metadata.csv` do not overlap with `database` labels
 (common in challenge test metadata), the script automatically falls back to

@@ -16,7 +16,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
@@ -121,6 +121,12 @@ class BaseLocalMatcher:
     def score_pairs(self, pairs: list[tuple[int, int]]) -> np.ndarray:
         raise NotImplementedError
 
+    def get_pair_matches(self, q_idx: int, db_idx: int) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def get_visual_image(self, side: str, idx: int) -> Image.Image:
+        raise NotImplementedError
+
 
 class AlikedLightGlueLocalMatcher(BaseLocalMatcher):
     def __init__(
@@ -147,12 +153,16 @@ class AlikedLightGlueLocalMatcher(BaseLocalMatcher):
         )
         self.query_features = None
         self.db_features = None
+        self.query_dataset = None
+        self.db_dataset = None
 
     def prepare(self, query_dataset: SimpleImageDataset, db_dataset: SimpleImageDataset):
         query_copy = query_dataset.get_subset(np.arange(len(query_dataset)))
         db_copy = db_dataset.get_subset(np.arange(len(db_dataset)))
         query_copy.transform = self.transform
         db_copy.transform = self.transform
+        self.query_dataset = query_copy
+        self.db_dataset = db_copy
         self.query_features = self.extractor(query_copy)
         self.db_features = self.extractor(db_copy)
 
@@ -165,6 +175,32 @@ class AlikedLightGlueLocalMatcher(BaseLocalMatcher):
         rows = self.matcher(self.query_features, self.db_features, pairs=pairs_np)
         score_map = {(q, d): score for q, d, score in rows}
         return np.asarray([score_map.get((int(q), int(d)), 0.0) for q, d in pairs], dtype=np.float32)
+
+    def get_pair_matches(self, q_idx: int, db_idx: int) -> dict[str, Any]:
+        from wildlife_tools.similarity import CollectAll
+
+        if self.query_features is None or self.db_features is None:
+            raise RuntimeError("prepare() must be called before get_pair_matches().")
+
+        pairs_np = np.asarray([(int(q_idx), int(db_idx))], dtype=np.int64)
+        old_collector = self.matcher.collector
+        try:
+            self.matcher.collector = CollectAll()
+            rows = self.matcher(self.query_features, self.db_features, pairs=pairs_np)
+        finally:
+            self.matcher.collector = old_collector
+        if len(rows) == 0:
+            return {"idx0": int(q_idx), "idx1": int(db_idx), "kpts0": np.empty((0, 2)), "kpts1": np.empty((0, 2)), "scores": np.empty((0,))}
+        return rows[0]
+
+    def get_visual_image(self, side: str, idx: int) -> Image.Image:
+        if side not in {"query", "db"}:
+            raise ValueError("side must be either 'query' or 'db'.")
+        dataset = self.query_dataset if side == "query" else self.db_dataset
+        if dataset is None:
+            raise RuntimeError("prepare() must be called before get_visual_image().")
+        sample = dataset[idx][0]
+        return to_rgb_pil(sample)
 
 
 class LoFTRLocalMatcher(BaseLocalMatcher):
@@ -209,6 +245,32 @@ class LoFTRLocalMatcher(BaseLocalMatcher):
         score_map = {(q, d): score for q, d, score in rows}
         return np.asarray([score_map.get((int(q), int(d)), 0.0) for q, d in pairs], dtype=np.float32)
 
+    def get_pair_matches(self, q_idx: int, db_idx: int) -> dict[str, Any]:
+        from wildlife_tools.similarity import CollectAll
+
+        if self.query_dataset is None or self.db_dataset is None:
+            raise RuntimeError("prepare() must be called before get_pair_matches().")
+
+        pairs_np = np.asarray([(int(q_idx), int(db_idx))], dtype=np.int64)
+        old_collector = self.matcher.collector
+        try:
+            self.matcher.collector = CollectAll()
+            rows = self.matcher(self.query_dataset, self.db_dataset, pairs=pairs_np)
+        finally:
+            self.matcher.collector = old_collector
+        if len(rows) == 0:
+            return {"idx0": int(q_idx), "idx1": int(db_idx), "kpts0": np.empty((0, 2)), "kpts1": np.empty((0, 2)), "scores": np.empty((0,))}
+        return rows[0]
+
+    def get_visual_image(self, side: str, idx: int) -> Image.Image:
+        if side not in {"query", "db"}:
+            raise ValueError("side must be either 'query' or 'db'.")
+        dataset = self.query_dataset if side == "query" else self.db_dataset
+        if dataset is None:
+            raise RuntimeError("prepare() must be called before get_visual_image().")
+        sample = dataset[idx][0]
+        return to_rgb_pil(sample)
+
 
 class ORBLocalMatcher(BaseLocalMatcher):
     """Weight-free local matcher for offline smoke tests."""
@@ -222,8 +284,8 @@ class ORBLocalMatcher(BaseLocalMatcher):
         self.ratio_test = ratio_test
         self.query_dataset = None
         self.db_dataset = None
-        self.query_cache: dict[int, np.ndarray] = {}
-        self.db_cache: dict[int, np.ndarray] = {}
+        self.query_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        self.db_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
     def prepare(self, query_dataset: SimpleImageDataset, db_dataset: SimpleImageDataset):
         self.query_dataset = query_dataset
@@ -231,38 +293,289 @@ class ORBLocalMatcher(BaseLocalMatcher):
         self.query_cache = {}
         self.db_cache = {}
 
-    def _compute_descriptor(self, dataset: SimpleImageDataset, idx: int, cache: dict[int, np.ndarray]) -> np.ndarray:
+    def _compute_features(
+        self,
+        dataset: SimpleImageDataset,
+        idx: int,
+        cache: dict[int, tuple[np.ndarray, np.ndarray]],
+    ) -> tuple[np.ndarray, np.ndarray]:
         if idx in cache:
             return cache[idx]
         img = np.asarray(dataset.get_image(idx).convert("L"))
-        _, desc = self.orb.detectAndCompute(img, None)
+        keypoints, desc = self.orb.detectAndCompute(img, None)
         if desc is None:
             desc = np.empty((0, 32), dtype=np.uint8)
-        cache[idx] = desc
-        return desc
+            points = np.empty((0, 2), dtype=np.float32)
+        else:
+            points = np.asarray([kp.pt for kp in keypoints], dtype=np.float32)
+        cache[idx] = (points, desc)
+        return cache[idx]
 
-    def _score_pair(self, q_idx: int, db_idx: int) -> float:
+    def _match_pair(self, q_idx: int, db_idx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         if self.query_dataset is None or self.db_dataset is None:
-            raise RuntimeError("prepare() must be called before score_pairs().")
-        desc_q = self._compute_descriptor(self.query_dataset, q_idx, self.query_cache)
-        desc_d = self._compute_descriptor(self.db_dataset, db_idx, self.db_cache)
+            raise RuntimeError("prepare() must be called before pair matching.")
+        pts_q, desc_q = self._compute_features(self.query_dataset, q_idx, self.query_cache)
+        pts_d, desc_d = self._compute_features(self.db_dataset, db_idx, self.db_cache)
         if len(desc_q) == 0 or len(desc_d) == 0:
-            return 0.0
+            return np.empty((0, 2), dtype=np.float32), np.empty((0, 2), dtype=np.float32), np.empty((0,), dtype=np.float32)
         knn_matches = self.bf.knnMatch(desc_q, desc_d, k=2)
-        good = 0
+        matched_q = []
+        matched_d = []
+        scores = []
         for pair in knn_matches:
             if len(pair) < 2:
                 continue
             m, n = pair
             if m.distance < self.ratio_test * n.distance:
-                good += 1
-        return float(good)
+                matched_q.append(pts_q[m.queryIdx])
+                matched_d.append(pts_d[m.trainIdx])
+                # Convert distance to similarity-like score in [0,1]
+                scores.append(float(max(0.0, 1.0 - (m.distance / 256.0))))
+        if len(matched_q) == 0:
+            return np.empty((0, 2), dtype=np.float32), np.empty((0, 2), dtype=np.float32), np.empty((0,), dtype=np.float32)
+        return (
+            np.asarray(matched_q, dtype=np.float32),
+            np.asarray(matched_d, dtype=np.float32),
+            np.asarray(scores, dtype=np.float32),
+        )
+
+    def _score_pair(self, q_idx: int, db_idx: int) -> float:
+        kpts0, _, _ = self._match_pair(q_idx, db_idx)
+        return float(len(kpts0))
 
     def score_pairs(self, pairs: list[tuple[int, int]]) -> np.ndarray:
         if len(pairs) == 0:
             return np.array([], dtype=np.float32)
         scores = [self._score_pair(int(q), int(d)) for q, d in pairs]
         return np.asarray(scores, dtype=np.float32)
+
+    def get_pair_matches(self, q_idx: int, db_idx: int) -> dict[str, Any]:
+        kpts0, kpts1, scores = self._match_pair(int(q_idx), int(db_idx))
+        return {
+            "idx0": int(q_idx),
+            "idx1": int(db_idx),
+            "kpts0": kpts0,
+            "kpts1": kpts1,
+            "scores": scores,
+        }
+
+    def get_visual_image(self, side: str, idx: int) -> Image.Image:
+        if side not in {"query", "db"}:
+            raise ValueError("side must be either 'query' or 'db'.")
+        dataset = self.query_dataset if side == "query" else self.db_dataset
+        if dataset is None:
+            raise RuntimeError("prepare() must be called before get_visual_image().")
+        return dataset.get_image(idx).convert("RGB")
+
+
+def to_rgb_pil(image_like: Any) -> Image.Image:
+    if isinstance(image_like, Image.Image):
+        return image_like.convert("RGB")
+
+    try:
+        import torch
+
+        if torch.is_tensor(image_like):
+            tensor = image_like.detach().cpu()
+            if tensor.ndim != 3:
+                raise ValueError(f"Expected 3D tensor (C,H,W), got shape={tuple(tensor.shape)}")
+            if tensor.shape[0] == 1:
+                tensor = tensor.repeat(3, 1, 1)
+            elif tensor.shape[0] > 3:
+                tensor = tensor[:3]
+            tensor = tensor.float()
+            if tensor.max() <= 1.5:
+                tensor = tensor.clamp(0.0, 1.0) * 255.0
+            tensor = tensor.round().clamp(0, 255).byte()
+            array = tensor.permute(1, 2, 0).numpy()
+            return Image.fromarray(array).convert("RGB")
+    except ImportError:
+        pass
+
+    if isinstance(image_like, np.ndarray):
+        array = image_like
+        if array.ndim == 2:
+            array = np.stack([array, array, array], axis=-1)
+        if array.dtype != np.uint8:
+            array = np.clip(array, 0, 255).astype(np.uint8)
+        return Image.fromarray(array).convert("RGB")
+
+    raise TypeError(f"Unsupported image type for visualization: {type(image_like)}")
+
+
+def sanitize_for_filename(text: Any) -> str:
+    value = str(text)
+    safe = []
+    for ch in value:
+        if ch.isalnum() or ch in ("-", "_", "."):
+            safe.append(ch)
+        else:
+            safe.append("_")
+    compact = "".join(safe).strip("_")
+    return compact if compact else "unknown"
+
+
+def get_line_color(i: int) -> tuple[int, int, int]:
+    r = (37 * i + 79) % 206 + 50
+    g = (97 * i + 31) % 206 + 50
+    b = (53 * i + 163) % 206 + 50
+    return int(r), int(g), int(b)
+
+
+def render_pair_matches(
+    img0: Image.Image,
+    img1: Image.Image,
+    kpts0: np.ndarray,
+    kpts1: np.ndarray,
+    scores: np.ndarray,
+    max_matches: int,
+    title_text: str,
+) -> Image.Image:
+    img0 = to_rgb_pil(img0)
+    img1 = to_rgb_pil(img1)
+    w0, h0 = img0.size
+    w1, h1 = img1.size
+    canvas_h = max(h0, h1) + 36
+    canvas_w = w0 + w1
+    canvas = Image.new("RGB", (canvas_w, canvas_h), color=(18, 18, 18))
+    canvas.paste(img0, (0, 36))
+    canvas.paste(img1, (w0, 36))
+
+    draw = ImageDraw.Draw(canvas)
+    draw.text((10, 10), title_text, fill=(235, 235, 235))
+
+    kpts0 = np.asarray(kpts0, dtype=np.float32).reshape(-1, 2)
+    kpts1 = np.asarray(kpts1, dtype=np.float32).reshape(-1, 2)
+    scores = np.asarray(scores, dtype=np.float32).reshape(-1)
+
+    n = min(len(kpts0), len(kpts1))
+    if n == 0:
+        draw.text((10, 24), "No matches", fill=(255, 120, 120))
+        return canvas
+
+    if len(scores) < n:
+        padded = np.zeros((n,), dtype=np.float32)
+        padded[: len(scores)] = scores
+        scores = padded
+    else:
+        scores = scores[:n]
+
+    order = np.argsort(-scores)[: min(max_matches, n)]
+    for i, idx in enumerate(order):
+        x0, y0 = float(kpts0[idx][0]), float(kpts0[idx][1] + 36)
+        x1, y1 = float(kpts1[idx][0] + w0), float(kpts1[idx][1] + 36)
+        color = get_line_color(i)
+        draw.line([(x0, y0), (x1, y1)], fill=color, width=1)
+        r = 2
+        draw.ellipse((x0 - r, y0 - r, x0 + r, y0 + r), outline=color)
+        draw.ellipse((x1 - r, y1 - r, x1 + r, y1 + r), outline=color)
+
+    draw.text((10, 24), f"matches shown: {len(order)} / {n}", fill=(180, 220, 255))
+    return canvas
+
+
+def select_visualization_rows(
+    results_df: pd.DataFrame,
+    per_dataset: int,
+) -> pd.DataFrame:
+    selected_parts = []
+    for dataset_name, group in results_df.groupby("dataset"):
+        group = group.sort_values(["scenario_id"]).reset_index(drop=True)
+        good = group[group["top1_hit"] == 1].sort_values(["gt_rank_in_candidates", "scenario_id"]).head(per_dataset)
+        bad = group[group["top1_hit"] == 0].sort_values(["gt_rank_in_candidates", "scenario_id"], ascending=[False, True]).head(per_dataset)
+        if len(good) > 0:
+            good = good.copy()
+            good["viz_bucket"] = "good"
+            selected_parts.append(good)
+        if len(bad) > 0:
+            bad = bad.copy()
+            bad["viz_bucket"] = "bad"
+            selected_parts.append(bad)
+
+        # If one side is empty, fill with whichever exists to keep up to 2*per_dataset samples.
+        if len(good) < per_dataset:
+            extra = group[group["top1_hit"] == 0].sort_values(["gt_rank_in_candidates", "scenario_id"], ascending=[False, True]).head(per_dataset - len(good))
+            if len(extra) > 0:
+                extra = extra.copy()
+                extra["viz_bucket"] = "bad_fill"
+                selected_parts.append(extra)
+        if len(bad) < per_dataset:
+            extra = group[group["top1_hit"] == 1].sort_values(["gt_rank_in_candidates", "scenario_id"]).head(per_dataset - len(bad))
+            if len(extra) > 0:
+                extra = extra.copy()
+                extra["viz_bucket"] = "good_fill"
+                selected_parts.append(extra)
+
+    if len(selected_parts) == 0:
+        return pd.DataFrame()
+
+    selected = pd.concat(selected_parts, axis=0, ignore_index=True)
+    selected = selected.drop_duplicates(subset=["scenario_id"]).sort_values(["dataset", "viz_bucket", "scenario_id"])
+    return selected.reset_index(drop=True)
+
+
+def generate_match_visualizations(
+    results_df: pd.DataFrame,
+    query_dataset: SimpleImageDataset,
+    db_dataset: SimpleImageDataset,
+    matcher: BaseLocalMatcher,
+    matcher_name: str,
+    output_dir: Path,
+    per_dataset: int,
+    max_matches: int,
+) -> list[Path]:
+    if per_dataset <= 0:
+        return []
+
+    selected = select_visualization_rows(results_df, per_dataset=per_dataset)
+    if len(selected) == 0:
+        return []
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    saved_paths: list[Path] = []
+
+    for _, row in selected.iterrows():
+        q_idx = int(row["query_idx"])
+        db_idx = int(row["pred_db_idx"])
+        dataset_name = str(row.get("dataset", "all"))
+        bucket = str(row.get("viz_bucket", "sample"))
+        scenario_id = int(row["scenario_id"])
+        query_image_id = sanitize_for_filename(row.get("query_image_id", f"q{q_idx}"))
+        pred_identity = sanitize_for_filename(row.get("pred_identity", f"db{db_idx}"))
+        top1_hit = int(row.get("top1_hit", -1))
+        gt_rank = int(row.get("gt_rank_in_candidates", -1))
+
+        try:
+            matches = matcher.get_pair_matches(q_idx, db_idx)
+            img_q = matcher.get_visual_image("query", q_idx)
+            img_db = matcher.get_visual_image("db", db_idx)
+        except Exception as exc:
+            print(f"[Warn] Visualization skipped for scenario={scenario_id}: {exc}")
+            continue
+
+        title = (
+            f"{matcher_name} | {dataset_name} | {bucket} | "
+            f"scenario={scenario_id} hit={top1_hit} gt_rank={gt_rank}"
+        )
+        canvas = render_pair_matches(
+            img0=img_q,
+            img1=img_db,
+            kpts0=np.asarray(matches.get("kpts0", np.empty((0, 2)))),
+            kpts1=np.asarray(matches.get("kpts1", np.empty((0, 2)))),
+            scores=np.asarray(matches.get("scores", np.empty((0,)))),
+            max_matches=max_matches,
+            title_text=title,
+        )
+
+        file_name = (
+            f"{sanitize_for_filename(dataset_name)}_{bucket}_"
+            f"scenario{scenario_id}_q{query_image_id}_pred{pred_identity}.jpg"
+        )
+        path = output_dir / file_name
+        canvas.save(path, quality=95)
+        saved_paths.append(path)
+
+    return saved_paths
 
 
 @dataclass
@@ -744,6 +1057,27 @@ def parse_args():
 
     parser.add_argument("--results-dir", type=str, default="experiments/local_rerank/results")
     parser.add_argument("--run-prefix", type=str, default="local_rerank")
+    parser.add_argument(
+        "--visualize-per-dataset",
+        type=int,
+        default=0,
+        help=(
+            "If > 0, save match-point visualizations per dataset with "
+            "up to N good and N bad samples."
+        ),
+    )
+    parser.add_argument(
+        "--visualize-max-matches",
+        type=int,
+        default=120,
+        help="Maximum number of correspondence lines to draw per visualization image.",
+    )
+    parser.add_argument(
+        "--visualize-dir",
+        type=str,
+        default=None,
+        help="Visualization output directory. Default: <results-dir>/visualizations/<run-prefix>",
+    )
     parser.add_argument("--no-check-paths", action="store_true", help="Skip checking that metadata image paths exist.")
     return parser.parse_args()
 
@@ -877,9 +1211,32 @@ def main():
             "synthetic_smoke": bool(args.synthetic_smoke),
             "query_source": args.query_source,
             "db_self_eval_per_id": args.db_self_eval_per_id,
+            "visualize_per_dataset": args.visualize_per_dataset,
+            "visualize_max_matches": args.visualize_max_matches,
         },
     )
     print_summary(summary)
+
+    if args.visualize_per_dataset > 0:
+        if args.visualize_dir is None:
+            vis_dir = Path(args.results_dir) / "visualizations" / args.run_prefix
+        else:
+            vis_dir = Path(args.visualize_dir)
+        saved_paths = generate_match_visualizations(
+            results_df=results_df,
+            query_dataset=query_dataset,
+            db_dataset=db_dataset,
+            matcher=matcher,
+            matcher_name=args.matcher,
+            output_dir=vis_dir,
+            per_dataset=args.visualize_per_dataset,
+            max_matches=args.visualize_max_matches,
+        )
+        summary["num_visualizations"] = int(len(saved_paths))
+        summary["visualization_dir"] = str(vis_dir)
+        print(f"[Saved] Visualizations: {len(saved_paths)} files -> {vis_dir}")
+    else:
+        summary["num_visualizations"] = 0
 
     csv_path, json_path = save_outputs(
         results_df,
