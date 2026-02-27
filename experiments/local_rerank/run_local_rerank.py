@@ -806,6 +806,7 @@ def build_scenarios(
     max_queries: int | None,
     dataset_filter: set[str] | None,
     seed: int,
+    same_dataset_only: bool,
 ) -> tuple[list[Scenario], int]:
     if candidate_size < 2:
         raise ValueError("candidate_size must be >= 2")
@@ -815,6 +816,15 @@ def build_scenarios(
     query_labels_norm = normalized_id_array(query_dataset)
     db_labels_norm = normalized_id_array(db_dataset)
     rng = np.random.default_rng(seed)
+    query_dataset_names = None
+    db_dataset_names = None
+    if same_dataset_only:
+        if "dataset" not in query_dataset.metadata.columns or "dataset" not in db_dataset.metadata.columns:
+            raise ValueError(
+                "`same_dataset_only` requires `dataset` column in both query and database metadata."
+            )
+        query_dataset_names = query_dataset.metadata["dataset"].astype(str).to_numpy()
+        db_dataset_names = db_dataset.metadata["dataset"].astype(str).to_numpy()
 
     query_indices = np.arange(len(query_dataset))
     if dataset_filter is not None and "dataset" in query_dataset.metadata.columns:
@@ -825,8 +835,7 @@ def build_scenarios(
         query_indices = np.sort(rng.choice(query_indices, size=max_queries, replace=False))
 
     db_all_indices = np.arange(len(db_dataset))
-    effective_candidate_size = min(candidate_size, len(db_dataset))
-    if effective_candidate_size < 2:
+    if len(db_all_indices) < 2:
         raise ValueError("Database must contain at least 2 images.")
 
     scenarios: list[Scenario] = []
@@ -836,14 +845,26 @@ def build_scenarios(
     for q_idx in query_indices:
         q_label = query_labels[q_idx]
         q_norm = query_labels_norm[q_idx]
+        if same_dataset_only:
+            q_dataset = query_dataset_names[q_idx]
+            db_scope = np.where(db_dataset_names == q_dataset)[0]
+            if len(db_scope) == 0:
+                skipped_no_positive += 1
+                continue
+        else:
+            db_scope = db_all_indices
+        effective_candidate_size = min(candidate_size, len(db_scope))
+        if effective_candidate_size < 2:
+            skipped_no_positive += 1
+            continue
         if q_norm is None:
             skipped_no_positive += 1
             continue
-        positive_indices = np.where(db_labels_norm == q_norm)[0]
+        positive_indices = db_scope[db_labels_norm[db_scope] == q_norm]
         if len(positive_indices) == 0:
             skipped_no_positive += 1
             continue
-        negative_indices = np.where(db_labels_norm != q_norm)[0]
+        negative_indices = db_scope[db_labels_norm[db_scope] != q_norm]
 
         for trial in range(trials_per_query):
             pos_idx = int(rng.choice(positive_indices))
@@ -853,7 +874,7 @@ def build_scenarios(
             else:
                 candidate = np.concatenate([[pos_idx], negative_indices])
                 if len(candidate) < effective_candidate_size:
-                    remaining = np.setdiff1d(db_all_indices, candidate, assume_unique=False)
+                    remaining = np.setdiff1d(db_scope, candidate, assume_unique=False)
                     extra = rng.choice(remaining, size=effective_candidate_size - len(candidate), replace=False)
                     candidate = np.concatenate([candidate, extra])
 
@@ -1024,6 +1045,14 @@ def parse_args():
     parser.add_argument("--dataset-filter", type=str, default=None, help="Comma-separated dataset names filter")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--cross-dataset-candidates",
+        action="store_true",
+        help=(
+            "Allow candidate sampling across different datasets/species. "
+            "Default behavior is same-dataset-only candidate sampling."
+        ),
+    )
+    parser.add_argument(
         "--query-source",
         type=str,
         default="auto",
@@ -1160,6 +1189,7 @@ def main():
         max_queries=args.max_queries,
         dataset_filter=dataset_filter,
         seed=args.seed,
+        same_dataset_only=not args.cross_dataset_candidates,
     )
     if len(scenarios) == 0:
         overlap_after = identity_overlap_count(query_dataset, db_dataset)
@@ -1179,6 +1209,7 @@ def main():
         )
         return 1
 
+    print(f"[Info] same_dataset_only={not args.cross_dataset_candidates}")
     print(f"[Info] Generated scenarios: {len(scenarios)}")
 
     try:
@@ -1211,6 +1242,7 @@ def main():
             "synthetic_smoke": bool(args.synthetic_smoke),
             "query_source": args.query_source,
             "db_self_eval_per_id": args.db_self_eval_per_id,
+            "same_dataset_only": bool(not args.cross_dataset_candidates),
             "visualize_per_dataset": args.visualize_per_dataset,
             "visualize_max_matches": args.visualize_max_matches,
         },

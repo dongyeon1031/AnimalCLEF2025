@@ -7,6 +7,7 @@ Goal:
 - Force-inject at least one ground-truth database sample into each pool.
 - Rank candidates using a **local matcher only** (no MegaDescriptor/EVA fusion).
 - Measure Top-1 hit rate.
+- By default, candidates are sampled **within the same dataset/species only**.
 
 ## Script
 
@@ -71,6 +72,12 @@ To force DB self-evaluation explicitly:
 
 ```bash
 ... --query-source db_self_eval --db-self-eval-per-id 1
+```
+
+To allow cross-species candidate sampling (not recommended):
+
+```bash
+... --cross-dataset-candidates
 ```
 
 Optional dataset filter:
