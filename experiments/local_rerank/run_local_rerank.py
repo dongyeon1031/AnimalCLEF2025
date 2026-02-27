@@ -22,6 +22,8 @@ import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw
 
+INVALID_IDENTITY_STRINGS = {"", "nan", "none", "null", "new_individual", "unknown"}
+
 
 class SimpleImageDataset:
     """Minimal dataset compatible with wildlife_tools extractors and matchers."""
@@ -344,6 +346,69 @@ def load_real_dataset(root: Path, auto_download: bool, check_paths: bool) -> tup
     return query_dataset, db_dataset
 
 
+def normalize_identity(value) -> str | None:
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    if text.lower() in INVALID_IDENTITY_STRINGS:
+        return None
+    return text
+
+
+def normalized_id_array(dataset: SimpleImageDataset) -> np.ndarray:
+    if dataset.col_label not in dataset.metadata.columns:
+        raise ValueError(f"Dataset metadata is missing `{dataset.col_label}` column.")
+    return np.asarray([normalize_identity(v) for v in dataset.metadata[dataset.col_label].values], dtype=object)
+
+
+def identity_overlap_count(query_dataset: SimpleImageDataset, db_dataset: SimpleImageDataset) -> int:
+    query_norm = normalized_id_array(query_dataset)
+    db_norm = normalized_id_array(db_dataset)
+    query_set = {x for x in query_norm if x is not None}
+    db_set = {x for x in db_norm if x is not None}
+    return len(query_set & db_set)
+
+
+def build_db_self_eval_split(
+    db_dataset: SimpleImageDataset,
+    per_identity_queries: int,
+    seed: int,
+) -> tuple[SimpleImageDataset, SimpleImageDataset]:
+    if per_identity_queries < 1:
+        raise ValueError("per_identity_queries must be >= 1")
+
+    df = db_dataset.metadata.reset_index(drop=True)
+    if "identity" not in df.columns:
+        raise ValueError("Database metadata must include `identity` for db_self_eval mode.")
+
+    rng = np.random.default_rng(seed)
+    query_indices = []
+
+    grouped = df.groupby("identity").indices
+    for identity, idx_like in grouped.items():
+        norm_id = normalize_identity(identity)
+        idx = np.asarray(idx_like, dtype=int)
+        if norm_id is None or len(idx) < 2:
+            continue
+        shuffled = idx.copy()
+        rng.shuffle(shuffled)
+        n_q = min(per_identity_queries, len(shuffled) - 1)
+        query_indices.extend(shuffled[:n_q].tolist())
+
+    if len(query_indices) == 0:
+        raise RuntimeError(
+            "db_self_eval split failed: no identity has at least 2 valid images in database."
+        )
+
+    query_indices = np.array(sorted(set(query_indices)), dtype=int)
+    db_mask = np.ones(len(df), dtype=bool)
+    db_mask[query_indices] = False
+
+    query_dataset = db_dataset.get_subset(query_indices)
+    db_dataset_new = db_dataset.get_subset(db_mask)
+    return query_dataset, db_dataset_new
+
+
 def build_pattern_image(identity_idx: int, variant_idx: int, size: int = 192) -> Image.Image:
     base_rng = np.random.default_rng(identity_idx)
     bg_color = tuple(int(v) for v in base_rng.integers(50, 180, size=3))
@@ -434,6 +499,8 @@ def build_scenarios(
 
     query_labels = query_dataset.labels_string.astype(str)
     db_labels = db_dataset.labels_string.astype(str)
+    query_labels_norm = normalized_id_array(query_dataset)
+    db_labels_norm = normalized_id_array(db_dataset)
     rng = np.random.default_rng(seed)
 
     query_indices = np.arange(len(query_dataset))
@@ -455,11 +522,15 @@ def build_scenarios(
     scenario_id = 0
     for q_idx in query_indices:
         q_label = query_labels[q_idx]
-        positive_indices = np.where(db_labels == q_label)[0]
+        q_norm = query_labels_norm[q_idx]
+        if q_norm is None:
+            skipped_no_positive += 1
+            continue
+        positive_indices = np.where(db_labels_norm == q_norm)[0]
         if len(positive_indices) == 0:
             skipped_no_positive += 1
             continue
-        negative_indices = np.where(db_labels != q_label)[0]
+        negative_indices = np.where(db_labels_norm != q_norm)[0]
 
         for trial in range(trials_per_query):
             pos_idx = int(rng.choice(positive_indices))
@@ -639,6 +710,23 @@ def parse_args():
     parser.add_argument("--max-queries", type=int, default=None)
     parser.add_argument("--dataset-filter", type=str, default=None, help="Comma-separated dataset names filter")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--query-source",
+        type=str,
+        default="auto",
+        choices=["auto", "metadata_query", "db_self_eval"],
+        help=(
+            "Source of query set. `metadata_query` uses split=query rows. "
+            "`db_self_eval` samples queries from database identities. "
+            "`auto` falls back to db_self_eval when query/db identity overlap is zero."
+        ),
+    )
+    parser.add_argument(
+        "--db-self-eval-per-id",
+        type=int,
+        default=1,
+        help="When query-source is db_self_eval, number of query images sampled per identity.",
+    )
 
     parser.add_argument(
         "--synthetic-smoke",
@@ -685,7 +773,49 @@ def main():
             auto_download=args.auto_download,
             check_paths=not args.no_check_paths,
         )
-        print(f"[Info] Loaded real dataset: query={len(query_dataset)}, database={len(db_dataset)}")
+        overlap = identity_overlap_count(query_dataset, db_dataset)
+        print(
+            f"[Info] Loaded real dataset: query={len(query_dataset)}, "
+            f"database={len(db_dataset)}, identity_overlap={overlap}"
+        )
+
+        if args.query_source == "db_self_eval":
+            try:
+                query_dataset, db_dataset = build_db_self_eval_split(
+                    db_dataset=db_dataset,
+                    per_identity_queries=args.db_self_eval_per_id,
+                    seed=args.seed,
+                )
+            except Exception as exc:
+                print(f"[Error] Failed to create db_self_eval split: {exc}")
+                return 1
+            print(
+                f"[Info] query_source=db_self_eval -> query={len(query_dataset)}, "
+                f"database={len(db_dataset)}"
+            )
+        elif args.query_source == "auto" and overlap == 0:
+            print(
+                "[Warn] Query/DB identity overlap is zero. "
+                "Falling back to db_self_eval mode automatically."
+            )
+            try:
+                query_dataset, db_dataset = build_db_self_eval_split(
+                    db_dataset=db_dataset,
+                    per_identity_queries=args.db_self_eval_per_id,
+                    seed=args.seed,
+                )
+            except Exception as exc:
+                print(
+                    "[Error] Auto fallback to db_self_eval failed. "
+                    f"Reason: {exc}"
+                )
+                return 1
+            print(
+                f"[Info] auto->db_self_eval -> query={len(query_dataset)}, "
+                f"database={len(db_dataset)}"
+            )
+        else:
+            print(f"[Info] query_source={args.query_source}")
 
     dataset_filter = parse_dataset_filter(args.dataset_filter)
     scenarios, skipped_no_positive = build_scenarios(
@@ -698,7 +828,22 @@ def main():
         seed=args.seed,
     )
     if len(scenarios) == 0:
-        raise RuntimeError("No scenarios were generated. Check dataset filter and labels.")
+        overlap_after = identity_overlap_count(query_dataset, db_dataset)
+        print(
+            "[Error] No scenarios were generated. "
+            "Check labels/query source/filter settings."
+        )
+        print(
+            f"[Error] query={len(query_dataset)}, database={len(db_dataset)}, "
+            f"identity_overlap={overlap_after}, dataset_filter={args.dataset_filter}"
+        )
+        print(
+            "[Hint] Try one of: "
+            "`--query-source db_self_eval`, "
+            "`--db-self-eval-per-id 1`, "
+            "or adjust `--dataset-filter`."
+        )
+        return 1
 
     print(f"[Info] Generated scenarios: {len(scenarios)}")
 
@@ -730,6 +875,8 @@ def main():
             "num_queries_without_positive_in_db": skipped_no_positive,
             "seed": args.seed,
             "synthetic_smoke": bool(args.synthetic_smoke),
+            "query_source": args.query_source,
+            "db_self_eval_per_id": args.db_self_eval_per_id,
         },
     )
     print_summary(summary)

@@ -28,6 +28,10 @@ You can override defaults with env vars:
 - `RESULTS_DIR`
 - `RUN_PREFIX`
 
+If `query` labels in `metadata.csv` do not overlap with `database` labels
+(common in challenge test metadata), the script automatically falls back to
+`db_self_eval` mode in `--query-source auto`.
+
 ## Matcher options
 
 - `aliked` (default): ALIKED extractor + LightGlue matcher
@@ -46,6 +50,12 @@ XDG_CACHE_HOME=/tmp \
   --candidate-size 25 \
   --trials-per-query 1 \
   --max-queries 200
+```
+
+To force DB self-evaluation explicitly:
+
+```bash
+... --query-source db_self_eval --db-self-eval-per-id 1
 ```
 
 Optional dataset filter:
