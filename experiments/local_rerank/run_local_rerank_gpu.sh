@@ -50,9 +50,9 @@ fi
 
 for m in "${MATCHER_LIST[@]}"; do
   case "${m}" in
-    aliked|loftr|orb) ;;
+    aliked|loftr|roma|orb) ;;
     *)
-      echo "[Error] Unsupported matcher: ${m}. Use one of: aliked loftr orb." >&2
+      echo "[Error] Unsupported matcher: ${m}. Use one of: aliked loftr roma orb." >&2
       exit 1
       ;;
   esac

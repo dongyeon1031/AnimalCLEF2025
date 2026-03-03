@@ -23,7 +23,7 @@ experiments/local_rerank/run_local_rerank_gpu.sh /path/to/animal-clef-2025
 ```
 
 You can override defaults with env vars:
-- `MATCHERS` (space-separated list, e.g. `"aliked loftr orb"`)
+- `MATCHERS` (space-separated list, e.g. `"aliked loftr roma orb"`)
 - `MATCHER` (single matcher; used only when `MATCHERS` is empty)
 - `CANDIDATE_SIZE` (default: `25`)
 - `TRIALS_PER_QUERY` (default: `1`)
@@ -56,7 +56,17 @@ If `query` labels in `metadata.csv` do not overlap with `database` labels
 
 - `aliked` (default): ALIKED extractor + LightGlue matcher
 - `loftr`: LoFTR matcher
+- `roma`: RoMA dense matcher (`romatch`, outdoor/indoor pretrained)
 - `orb`: OpenCV ORB local matcher (no pretrained weights, useful for offline smoke tests)
+
+RoMA-specific CLI options:
+- `--roma-variant {outdoor,indoor}` (default: `outdoor`)
+- `--roma-coarse-res` (default: `560`)
+- `--roma-upsample-res` (default: `864`)
+- RoMA 해상도 옵션은 둘 다 `14`의 배수여야 함
+- `--roma-cert-threshold` (default: `0.5`)
+- `--roma-max-samples` (default: `1200`, visualization sampling limit)
+- `--roma-score-mode {count,sum,sum_above}` (default: `sum_above`)
 
 ## Real dataset run (AnimalCLEF2025)
 
@@ -76,6 +86,17 @@ To force DB self-evaluation explicitly:
 
 ```bash
 ... --query-source db_self_eval --db-self-eval-per-id 1
+```
+
+RoMA example:
+
+```bash
+MATCHERS="roma" \
+PYTHON_BIN=/opt/anaconda3/envs/animal_reid/bin/python \
+experiments/local_rerank/run_local_rerank_gpu.sh /path/to/animal-clef-2025 \
+  --max-queries 100 \
+  --roma-variant outdoor \
+  --roma-score-mode sum_above
 ```
 
 To allow cross-species candidate sampling (not recommended):
@@ -111,9 +132,9 @@ This generates synthetic images in:
 And outputs results to:
 - `experiments/local_rerank/results`
 
-## Notes on ALIKED / LoFTR weights
+## Notes on pretrained weights
 
-`aliked` and `loftr` use pretrained checkpoints loaded by upstream libraries.
+`aliked`, `loftr`, and `roma` use pretrained checkpoints loaded by upstream libraries.
 If internet is blocked, initialization can fail while downloading checkpoints.
 
 You can either:

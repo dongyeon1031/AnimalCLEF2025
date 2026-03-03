@@ -272,6 +272,135 @@ class LoFTRLocalMatcher(BaseLocalMatcher):
         return to_rgb_pil(sample)
 
 
+class RoMALocalMatcher(BaseLocalMatcher):
+    """RoMA dense matcher wrapper for pair scoring + visualization."""
+
+    def __init__(
+        self,
+        device: str,
+        variant: str,
+        cert_threshold: float,
+        max_samples: int,
+        score_mode: str,
+        coarse_res: int,
+        upsample_res: int,
+    ):
+        import torch
+        import romatch
+
+        if variant == "outdoor":
+            builder = romatch.roma_outdoor
+        elif variant == "indoor":
+            builder = romatch.roma_indoor
+        else:
+            raise ValueError(f"Unsupported RoMA variant: {variant}")
+
+        amp_dtype = torch.float16 if device == "cuda" else torch.float32
+        self.device = device
+        self.cert_threshold = float(cert_threshold)
+        self.max_samples = int(max_samples)
+        self.score_mode = str(score_mode)
+        self.query_dataset = None
+        self.db_dataset = None
+        self._torch = torch
+        self.matcher = builder(
+            device=device,
+            coarse_res=int(coarse_res),
+            upsample_res=int(upsample_res),
+            amp_dtype=amp_dtype,
+        )
+        self._pair_cache: dict[tuple[int, int], dict[str, Any]] = {}
+
+    def prepare(self, query_dataset: SimpleImageDataset, db_dataset: SimpleImageDataset):
+        self.query_dataset = query_dataset
+        self.db_dataset = db_dataset
+        self._pair_cache = {}
+
+    def _compute_pair(self, q_idx: int, db_idx: int) -> dict[str, Any]:
+        key = (int(q_idx), int(db_idx))
+        cached = self._pair_cache.get(key)
+        if cached is not None:
+            return cached
+        if self.query_dataset is None or self.db_dataset is None:
+            raise RuntimeError("prepare() must be called before pair matching.")
+
+        img_q = self.query_dataset.get_image(int(q_idx)).convert("RGB")
+        img_d = self.db_dataset.get_image(int(db_idx)).convert("RGB")
+
+        with self._torch.inference_mode():
+            warp, cert = self.matcher.match(img_q, img_d, batched=True, device=self.device)
+        if warp.ndim == 4:
+            warp = warp[0]
+        if cert.ndim == 3:
+            cert = cert[0]
+        cert = cert.float()
+
+        if self.score_mode == "count":
+            pair_score = float((cert > self.cert_threshold).sum().item())
+        elif self.score_mode == "sum":
+            pair_score = float(cert.sum().item())
+        elif self.score_mode == "sum_above":
+            pair_score = float((cert - self.cert_threshold).clamp(min=0.0).sum().item())
+        else:
+            raise ValueError(f"Unsupported roma-score-mode: {self.score_mode}")
+
+        kpts0 = np.empty((0, 2), dtype=np.float32)
+        kpts1 = np.empty((0, 2), dtype=np.float32)
+        scores = np.empty((0,), dtype=np.float32)
+        if self.max_samples > 0 and cert.numel() > 0:
+            sample_num = int(min(self.max_samples, cert.numel()))
+            sampled_matches, sampled_scores = self.matcher.sample(warp, cert, num=sample_num)
+            keep_mask = sampled_scores > self.cert_threshold
+            sampled_matches = sampled_matches[keep_mask]
+            sampled_scores = sampled_scores[keep_mask]
+            if len(sampled_matches) > 0:
+                kpts0_t, kpts1_t = self.matcher.to_pixel_coordinates(
+                    sampled_matches,
+                    H_A=img_q.height,
+                    W_A=img_q.width,
+                    H_B=img_d.height,
+                    W_B=img_d.width,
+                )
+                kpts0 = kpts0_t.detach().cpu().numpy().astype(np.float32)
+                kpts1 = kpts1_t.detach().cpu().numpy().astype(np.float32)
+                scores = sampled_scores.detach().cpu().numpy().astype(np.float32)
+
+        out = {
+            "idx0": int(q_idx),
+            "idx1": int(db_idx),
+            "kpts0": kpts0,
+            "kpts1": kpts1,
+            "scores": scores,
+            "pair_score": pair_score,
+        }
+        self._pair_cache[key] = out
+        return out
+
+    def score_pairs(self, pairs: list[tuple[int, int]]) -> np.ndarray:
+        if len(pairs) == 0:
+            return np.array([], dtype=np.float32)
+        rows = [self._compute_pair(int(q), int(d)) for q, d in pairs]
+        return np.asarray([float(row["pair_score"]) for row in rows], dtype=np.float32)
+
+    def get_pair_matches(self, q_idx: int, db_idx: int) -> dict[str, Any]:
+        row = self._compute_pair(int(q_idx), int(db_idx))
+        return {
+            "idx0": row["idx0"],
+            "idx1": row["idx1"],
+            "kpts0": row["kpts0"],
+            "kpts1": row["kpts1"],
+            "scores": row["scores"],
+        }
+
+    def get_visual_image(self, side: str, idx: int) -> Image.Image:
+        if side not in {"query", "db"}:
+            raise ValueError("side must be either 'query' or 'db'.")
+        dataset = self.query_dataset if side == "query" else self.db_dataset
+        if dataset is None:
+            raise RuntimeError("prepare() must be called before get_visual_image().")
+        return dataset.get_image(idx).convert("RGB")
+
+
 class ORBLocalMatcher(BaseLocalMatcher):
     """Weight-free local matcher for offline smoke tests."""
 
@@ -917,13 +1046,28 @@ def build_matcher(args, device: str) -> BaseLocalMatcher:
                 confidence_threshold=args.confidence_threshold,
                 pretrained=args.loftr_pretrained,
             )
+        if args.matcher == "roma":
+            if args.roma_coarse_res % 14 != 0 or args.roma_upsample_res % 14 != 0:
+                raise ValueError(
+                    "RoMA resolution must be a multiple of 14. "
+                    f"Got coarse={args.roma_coarse_res}, upsample={args.roma_upsample_res}."
+                )
+            return RoMALocalMatcher(
+                device=device,
+                variant=args.roma_variant,
+                cert_threshold=args.roma_cert_threshold,
+                max_samples=args.roma_max_samples,
+                score_mode=args.roma_score_mode,
+                coarse_res=args.roma_coarse_res,
+                upsample_res=args.roma_upsample_res,
+            )
         if args.matcher == "orb":
             return ORBLocalMatcher(n_features=args.orb_features, ratio_test=args.orb_ratio_test)
         raise ValueError(f"Unsupported matcher: {args.matcher}")
     except Exception as exc:
         raise RuntimeError(
             "Failed to initialize local matcher. "
-            "If you are offline, ALIKED/LoFTR may fail while downloading pretrained checkpoints. "
+            "If you are offline, ALIKED/LoFTR/RoMA may fail while downloading pretrained checkpoints. "
             "Try `--matcher orb` for smoke tests, or pre-populate $TORCH_HOME/hub/checkpoints."
         ) from exc
 
@@ -1027,7 +1171,7 @@ def parse_args():
         "--matcher",
         type=str,
         default="aliked",
-        choices=["aliked", "loftr", "orb"],
+        choices=["aliked", "loftr", "roma", "orb"],
         help="Local matcher backend",
     )
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
@@ -1036,6 +1180,12 @@ def parse_args():
     parser.add_argument("--max-num-keypoints", type=int, default=256)
     parser.add_argument("--confidence-threshold", type=float, default=0.5)
     parser.add_argument("--loftr-pretrained", type=str, default="outdoor", choices=["outdoor", "indoor"])
+    parser.add_argument("--roma-variant", type=str, default="outdoor", choices=["outdoor", "indoor"])
+    parser.add_argument("--roma-coarse-res", type=int, default=560)
+    parser.add_argument("--roma-upsample-res", type=int, default=864)
+    parser.add_argument("--roma-cert-threshold", type=float, default=0.5)
+    parser.add_argument("--roma-max-samples", type=int, default=1200)
+    parser.add_argument("--roma-score-mode", type=str, default="sum_above", choices=["count", "sum", "sum_above"])
     parser.add_argument("--orb-features", type=int, default=1500)
     parser.add_argument("--orb-ratio-test", type=float, default=0.75)
 
@@ -1245,6 +1395,11 @@ def main():
             "same_dataset_only": bool(not args.cross_dataset_candidates),
             "visualize_per_dataset": args.visualize_per_dataset,
             "visualize_max_matches": args.visualize_max_matches,
+            "roma_variant": args.roma_variant if args.matcher == "roma" else None,
+            "roma_cert_threshold": args.roma_cert_threshold if args.matcher == "roma" else None,
+            "roma_score_mode": args.roma_score_mode if args.matcher == "roma" else None,
+            "roma_coarse_res": args.roma_coarse_res if args.matcher == "roma" else None,
+            "roma_upsample_res": args.roma_upsample_res if args.matcher == "roma" else None,
         },
     )
     print_summary(summary)
