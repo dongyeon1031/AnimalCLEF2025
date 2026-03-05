@@ -16,6 +16,7 @@ if [[ $# -gt 0 ]]; then
 fi
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
+DEVICE="${DEVICE:-cuda}"
 # If MATCHERS is empty and MATCHER is also empty, run all candidates by default.
 MATCHERS="${MATCHERS:-}"
 MATCHER="${MATCHER:-}"
@@ -58,7 +59,7 @@ for m in "${MATCHER_LIST[@]}"; do
   esac
 done
 
-echo "[Run] python=${PYTHON_BIN}, data_root=${DATA_ROOT}, device=cuda, matchers=${MATCHER_LIST[*]}"
+echo "[Run] python=${PYTHON_BIN}, data_root=${DATA_ROOT}, device=${DEVICE}, matchers=${MATCHER_LIST[*]}"
 
 failed=()
 for m in "${MATCHER_LIST[@]}"; do
@@ -71,7 +72,7 @@ for m in "${MATCHER_LIST[@]}"; do
   if "${PYTHON_BIN}" experiments/local_rerank/run_local_rerank.py \
     --root "${DATA_ROOT}" \
     --matcher "${m}" \
-    --device cuda \
+    --device "${DEVICE}" \
     --batch-size "${batch_size_for_matcher}" \
     --candidate-size "${CANDIDATE_SIZE}" \
     --trials-per-query "${TRIALS_PER_QUERY}" \
