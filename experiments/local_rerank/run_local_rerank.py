@@ -1367,6 +1367,9 @@ def main():
         matcher.prepare(query_dataset, db_dataset)
     except Exception as exc:
         print(f"[Error] {exc}")
+        cause = getattr(exc, "__cause__", None)
+        if cause is not None:
+            print(f"[Error] Root cause: {type(cause).__name__}: {cause}")
         return 1
 
     unique_pairs = sorted({(s.query_idx, int(db_idx)) for s in scenarios for db_idx in s.candidate_db_indices})
