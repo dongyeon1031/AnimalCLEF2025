@@ -63,7 +63,7 @@ RoMA-specific CLI options:
 - `--roma-variant {outdoor,indoor}` (default: `outdoor`)
 - `--roma-coarse-res` (default: `560`)
 - `--roma-upsample-res` (default: `864`)
-- RoMA 해상도 옵션은 둘 다 `14`의 배수여야 함
+- `--roma-coarse-res`는 `14`의 배수 권장/요구
 - `--roma-cert-threshold` (default: `0.5`)
 - `--roma-max-samples` (default: `1200`, visualization sampling limit)
 - `--roma-score-mode {count,sum,sum_above}` (default: `sum_above`)

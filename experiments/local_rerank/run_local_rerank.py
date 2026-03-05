@@ -1047,10 +1047,10 @@ def build_matcher(args, device: str) -> BaseLocalMatcher:
                 pretrained=args.loftr_pretrained,
             )
         if args.matcher == "roma":
-            if args.roma_coarse_res % 14 != 0 or args.roma_upsample_res % 14 != 0:
+            if args.roma_coarse_res % 14 != 0:
                 raise ValueError(
-                    "RoMA resolution must be a multiple of 14. "
-                    f"Got coarse={args.roma_coarse_res}, upsample={args.roma_upsample_res}."
+                    "RoMA coarse resolution must be a multiple of 14. "
+                    f"Got coarse={args.roma_coarse_res}."
                 )
             return RoMALocalMatcher(
                 device=device,
