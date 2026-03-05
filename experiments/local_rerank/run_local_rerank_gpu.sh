@@ -15,6 +15,14 @@ if [[ $# -gt 0 ]]; then
   shift
 fi
 
+AB_TEST_MODE=0
+for arg in "$@"; do
+  if [[ "${arg}" == "--ab-test" ]]; then
+    AB_TEST_MODE=1
+    break
+  fi
+done
+
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DEVICE="${DEVICE:-cuda}"
 # If MATCHERS is empty and MATCHER is also empty, run all candidates by default.
@@ -46,7 +54,11 @@ if [[ -n "${MATCHERS}" ]]; then
 elif [[ -n "${MATCHER}" ]]; then
   MATCHER_LIST=("${MATCHER}")
 else
-  MATCHER_LIST=("aliked" "loftr" "orb")
+  if [[ "${AB_TEST_MODE}" -eq 1 ]]; then
+    MATCHER_LIST=("aliked")
+  else
+    MATCHER_LIST=("aliked" "loftr" "orb")
+  fi
 fi
 
 for m in "${MATCHER_LIST[@]}"; do

@@ -23,6 +23,7 @@ import pandas as pd
 from PIL import Image, ImageDraw
 
 INVALID_IDENTITY_STRINGS = {"", "nan", "none", "null", "new_individual", "unknown"}
+ALIKED_AB_VARIANTS = ("baseline", "geom", "geom_cov", "two_stage")
 
 
 class SimpleImageDataset:
@@ -124,6 +125,12 @@ class BaseLocalMatcher:
     def get_pair_matches(self, q_idx: int, db_idx: int) -> dict[str, Any]:
         raise NotImplementedError
 
+    def collect_pair_matches(self, pairs: list[tuple[int, int]]) -> dict[tuple[int, int], dict[str, Any]]:
+        rows = {}
+        for q_idx, db_idx in pairs:
+            rows[(int(q_idx), int(db_idx))] = self.get_pair_matches(int(q_idx), int(db_idx))
+        return rows
+
     def get_visual_image(self, side: str, idx: int) -> Image.Image:
         raise NotImplementedError
 
@@ -193,6 +200,38 @@ class AlikedLightGlueLocalMatcher(BaseLocalMatcher):
             return {"idx0": int(q_idx), "idx1": int(db_idx), "kpts0": np.empty((0, 2)), "kpts1": np.empty((0, 2)), "scores": np.empty((0,))}
         return rows[0]
 
+    def collect_pair_matches(self, pairs: list[tuple[int, int]]) -> dict[tuple[int, int], dict[str, Any]]:
+        from wildlife_tools.similarity import CollectAll
+
+        if self.query_features is None or self.db_features is None:
+            raise RuntimeError("prepare() must be called before collect_pair_matches().")
+        if len(pairs) == 0:
+            return {}
+
+        pairs_np = np.asarray(pairs, dtype=np.int64)
+        old_collector = self.matcher.collector
+        try:
+            self.matcher.collector = CollectAll()
+            rows = self.matcher(self.query_features, self.db_features, pairs=pairs_np)
+        finally:
+            self.matcher.collector = old_collector
+
+        out: dict[tuple[int, int], dict[str, Any]] = {}
+        for row in rows:
+            key = (int(row["idx0"]), int(row["idx1"]))
+            out[key] = row
+
+        empty = {
+            "kpts0": np.empty((0, 2), dtype=np.float32),
+            "kpts1": np.empty((0, 2), dtype=np.float32),
+            "scores": np.empty((0,), dtype=np.float32),
+        }
+        for q_idx, db_idx in pairs:
+            key = (int(q_idx), int(db_idx))
+            if key not in out:
+                out[key] = {"idx0": key[0], "idx1": key[1], **empty}
+        return out
+
     def get_visual_image(self, side: str, idx: int) -> Image.Image:
         if side not in {"query", "db"}:
             raise ValueError("side must be either 'query' or 'db'.")
@@ -261,6 +300,38 @@ class LoFTRLocalMatcher(BaseLocalMatcher):
         if len(rows) == 0:
             return {"idx0": int(q_idx), "idx1": int(db_idx), "kpts0": np.empty((0, 2)), "kpts1": np.empty((0, 2)), "scores": np.empty((0,))}
         return rows[0]
+
+    def collect_pair_matches(self, pairs: list[tuple[int, int]]) -> dict[tuple[int, int], dict[str, Any]]:
+        from wildlife_tools.similarity import CollectAll
+
+        if self.query_dataset is None or self.db_dataset is None:
+            raise RuntimeError("prepare() must be called before collect_pair_matches().")
+        if len(pairs) == 0:
+            return {}
+
+        pairs_np = np.asarray(pairs, dtype=np.int64)
+        old_collector = self.matcher.collector
+        try:
+            self.matcher.collector = CollectAll()
+            rows = self.matcher(self.query_dataset, self.db_dataset, pairs=pairs_np)
+        finally:
+            self.matcher.collector = old_collector
+
+        out: dict[tuple[int, int], dict[str, Any]] = {}
+        for row in rows:
+            key = (int(row["idx0"]), int(row["idx1"]))
+            out[key] = row
+
+        empty = {
+            "kpts0": np.empty((0, 2), dtype=np.float32),
+            "kpts1": np.empty((0, 2), dtype=np.float32),
+            "scores": np.empty((0,), dtype=np.float32),
+        }
+        for q_idx, db_idx in pairs:
+            key = (int(q_idx), int(db_idx))
+            if key not in out:
+                out[key] = {"idx0": key[0], "idx1": key[1], **empty}
+        return out
 
     def get_visual_image(self, side: str, idx: int) -> Image.Image:
         if side not in {"query", "db"}:
@@ -1115,6 +1186,221 @@ def evaluate_scenarios(
     return pd.DataFrame(rows)
 
 
+def parse_ab_variants(text: str) -> list[str]:
+    raw = str(text or "").strip()
+    if raw == "":
+        return list(ALIKED_AB_VARIANTS)
+
+    variants = []
+    for token in raw.split(","):
+        name = token.strip().lower()
+        if not name:
+            continue
+        if name not in ALIKED_AB_VARIANTS:
+            raise ValueError(
+                f"Unsupported A/B variant: {name}. "
+                f"Allowed: {', '.join(ALIKED_AB_VARIANTS)}"
+            )
+        variants.append(name)
+
+    if len(variants) == 0:
+        raise ValueError("No valid A/B variants were provided.")
+    return list(dict.fromkeys(variants))
+
+
+def _normalize_match_arrays(match_row: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    kpts0 = np.asarray(match_row.get("kpts0", np.empty((0, 2))), dtype=np.float32).reshape(-1, 2)
+    kpts1 = np.asarray(match_row.get("kpts1", np.empty((0, 2))), dtype=np.float32).reshape(-1, 2)
+    scores = np.asarray(match_row.get("scores", np.empty((0,))), dtype=np.float32).reshape(-1)
+    n = min(len(kpts0), len(kpts1))
+    kpts0 = kpts0[:n]
+    kpts1 = kpts1[:n]
+    if len(scores) < n:
+        padded = np.zeros((n,), dtype=np.float32)
+        padded[: len(scores)] = scores
+        scores = padded
+    else:
+        scores = scores[:n]
+    return kpts0, kpts1, scores
+
+
+def _estimate_fundamental_inliers(
+    kpts0: np.ndarray,
+    kpts1: np.ndarray,
+    min_geom_matches: int,
+    ransac_reproj_threshold: float,
+    ransac_confidence: float,
+    ransac_max_iters: int,
+) -> np.ndarray:
+    n = min(len(kpts0), len(kpts1))
+    if n < min_geom_matches:
+        return np.zeros((n,), dtype=bool)
+    try:
+        import cv2
+    except Exception:
+        return np.zeros((n,), dtype=bool)
+
+    method = cv2.USAC_MAGSAC if hasattr(cv2, "USAC_MAGSAC") else cv2.FM_RANSAC
+    try:
+        _, mask = cv2.findFundamentalMat(
+            kpts0,
+            kpts1,
+            method=method,
+            ransacReprojThreshold=float(ransac_reproj_threshold),
+            confidence=float(ransac_confidence),
+            maxIters=int(ransac_max_iters),
+        )
+    except Exception:
+        return np.zeros((n,), dtype=bool)
+
+    if mask is None:
+        return np.zeros((n,), dtype=bool)
+    mask = np.asarray(mask).reshape(-1).astype(bool)
+    if len(mask) < n:
+        padded = np.zeros((n,), dtype=bool)
+        padded[: len(mask)] = mask
+        return padded
+    return mask[:n]
+
+
+def _bbox_coverage(points: np.ndarray, reference_size: float) -> float:
+    points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+    if len(points) < 2:
+        return 0.0
+    x_span = float(np.max(points[:, 0]) - np.min(points[:, 0]))
+    y_span = float(np.max(points[:, 1]) - np.min(points[:, 1]))
+    area = max(0.0, x_span) * max(0.0, y_span)
+    denom = float(max(reference_size, 1.0) ** 2)
+    return float(np.clip(area / denom, 0.0, 1.0))
+
+
+def build_aliked_ab_score_maps(
+    pair_matches: dict[tuple[int, int], dict[str, Any]],
+    confidence_threshold: float,
+    min_geom_matches: int,
+    ransac_reproj_threshold: float,
+    ransac_confidence: float,
+    ransac_max_iters: int,
+    coverage_weight: float,
+    coverage_ref_size: float,
+) -> dict[str, dict[tuple[int, int], float]]:
+    baseline_map: dict[tuple[int, int], float] = {}
+    geom_map: dict[tuple[int, int], float] = {}
+    geom_cov_map: dict[tuple[int, int], float] = {}
+
+    for pair, row in pair_matches.items():
+        kpts0, kpts1, scores = _normalize_match_arrays(row)
+        n = len(kpts0)
+        if n == 0:
+            baseline_map[pair] = 0.0
+            geom_map[pair] = 0.0
+            geom_cov_map[pair] = 0.0
+            continue
+
+        high_conf_count = float(np.sum(scores > float(confidence_threshold)))
+        inlier_mask = _estimate_fundamental_inliers(
+            kpts0=kpts0,
+            kpts1=kpts1,
+            min_geom_matches=min_geom_matches,
+            ransac_reproj_threshold=ransac_reproj_threshold,
+            ransac_confidence=ransac_confidence,
+            ransac_max_iters=ransac_max_iters,
+        )
+        inlier_count = int(np.sum(inlier_mask))
+        mean_inlier_conf = float(np.mean(scores[inlier_mask])) if inlier_count > 0 else 0.0
+
+        geom_score = float(inlier_count * mean_inlier_conf * np.log1p(float(n)))
+        if inlier_count > 1:
+            cov_q = _bbox_coverage(kpts0[inlier_mask], reference_size=coverage_ref_size)
+            cov_d = _bbox_coverage(kpts1[inlier_mask], reference_size=coverage_ref_size)
+            coverage = 0.5 * (cov_q + cov_d)
+        else:
+            coverage = 0.0
+        geom_cov_score = float(geom_score * (1.0 + float(coverage_weight) * coverage))
+
+        baseline_map[pair] = high_conf_count
+        geom_map[pair] = geom_score
+        geom_cov_map[pair] = geom_cov_score
+
+    return {"baseline": baseline_map, "geom": geom_map, "geom_cov": geom_cov_map}
+
+
+def evaluate_scenarios_two_stage(
+    scenarios: list[Scenario],
+    db_dataset: SimpleImageDataset,
+    stage1_score_map: dict[tuple[int, int], float],
+    stage2_score_map: dict[tuple[int, int], float],
+    topk: int,
+) -> pd.DataFrame:
+    db_labels = db_dataset.labels_string.astype(str)
+    rows = []
+
+    for scenario in scenarios:
+        candidate = scenario.candidate_db_indices.astype(int)
+        stage1_scores = np.asarray(
+            [stage1_score_map.get((scenario.query_idx, int(db_idx)), 0.0) for db_idx in candidate],
+            dtype=np.float32,
+        )
+        stage2_scores = np.asarray(
+            [stage2_score_map.get((scenario.query_idx, int(db_idx)), 0.0) for db_idx in candidate],
+            dtype=np.float32,
+        )
+        stage1_scores = np.where(np.isnan(stage1_scores), -np.inf, stage1_scores)
+        stage2_scores = np.where(np.isnan(stage2_scores), -np.inf, stage2_scores)
+
+        stage1_order = np.argsort(-stage1_scores, kind="mergesort")
+        k = int(min(max(topk, 0), len(stage1_order)))
+        if k > 0:
+            top_idx = stage1_order[:k]
+            top_reorder = top_idx[np.argsort(-stage2_scores[top_idx], kind="mergesort")]
+            final_order = np.concatenate([top_reorder, stage1_order[k:]])
+        else:
+            final_order = stage1_order
+
+        best_local_idx = int(final_order[0])
+        pred_db_idx = int(candidate[best_local_idx])
+        pred_identity = str(db_labels[pred_db_idx])
+        hit = int(pred_db_idx == scenario.injected_positive_db_idx)
+
+        gt_pos_local = int(np.where(candidate == scenario.injected_positive_db_idx)[0][0])
+        gt_rank = int(np.where(final_order == gt_pos_local)[0][0] + 1)
+
+        rows.append(
+            {
+                "scenario_id": scenario.scenario_id,
+                "query_idx": scenario.query_idx,
+                "query_image_id": scenario.query_image_id,
+                "query_identity": scenario.query_identity,
+                "dataset": scenario.dataset_name,
+                "trial": scenario.trial,
+                "candidate_size": len(candidate),
+                "injected_positive_db_idx": scenario.injected_positive_db_idx,
+                "pred_db_idx": pred_db_idx,
+                "pred_identity": pred_identity,
+                "top1_hit": hit,
+                "gt_rank_in_candidates": gt_rank,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def save_ab_comparison(
+    comparison_df: pd.DataFrame,
+    all_summaries: list[dict[str, Any]],
+    results_dir: Path,
+    run_prefix: str,
+) -> tuple[Path, Path]:
+    results_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_path = results_dir / f"{run_prefix}_{ts}_ab_comparison.csv"
+    json_path = results_dir / f"{run_prefix}_{ts}_ab_comparison.json"
+    comparison_df.to_csv(csv_path, index=False)
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(all_summaries, f, ensure_ascii=False, indent=2)
+    return csv_path, json_path
+
+
 def summarize_results(df: pd.DataFrame, meta: dict) -> dict:
     summary = dict(meta)
     if len(df) == 0:
@@ -1188,6 +1474,44 @@ def parse_args():
     parser.add_argument("--roma-score-mode", type=str, default="sum_above", choices=["count", "sum", "sum_above"])
     parser.add_argument("--orb-features", type=int, default=1500)
     parser.add_argument("--orb-ratio-test", type=float, default=0.75)
+    parser.add_argument(
+        "--ab-test",
+        action="store_true",
+        help=(
+            "Run ALIKED A/B test variants on the exact same scenarios. "
+            "Variants are baseline, geom, geom_cov, two_stage."
+        ),
+    )
+    parser.add_argument(
+        "--ab-variants",
+        type=str,
+        default="baseline,geom,geom_cov,two_stage",
+        help="Comma-separated A/B variants. Allowed: baseline,geom,geom_cov,two_stage",
+    )
+    parser.add_argument("--ab-two-stage-topk", type=int, default=5, help="Top-K for two-stage reranking variant.")
+    parser.add_argument("--ab-min-geom-matches", type=int, default=8, help="Minimum matches required for geometric verification.")
+    parser.add_argument("--ab-ransac-reproj-threshold", type=float, default=1.5)
+    parser.add_argument("--ab-ransac-confidence", type=float, default=0.999)
+    parser.add_argument("--ab-ransac-max-iters", type=int, default=5000)
+    parser.add_argument(
+        "--ab-coverage-weight",
+        type=float,
+        default=0.3,
+        help="Coverage boost weight for geom_cov score.",
+    )
+    parser.add_argument(
+        "--ab-coverage-ref-size",
+        type=float,
+        default=512.0,
+        help="Reference image size used for coverage normalization.",
+    )
+    parser.add_argument(
+        "--ab-visualize-variant",
+        type=str,
+        default="best",
+        choices=["best", "none", "baseline", "geom", "geom_cov", "two_stage"],
+        help="When --ab-test and visualization is enabled, which variant to visualize.",
+    )
 
     parser.add_argument("--candidate-size", type=int, default=25)
     parser.add_argument("--trials-per-query", type=int, default=1)
@@ -1374,6 +1698,158 @@ def main():
 
     unique_pairs = sorted({(s.query_idx, int(db_idx)) for s in scenarios for db_idx in s.candidate_db_indices})
     print(f"[Info] Unique local-matching pairs to score: {len(unique_pairs)}")
+    base_meta = {
+        "matcher": args.matcher,
+        "device": device,
+        "candidate_size": args.candidate_size,
+        "trials_per_query": args.trials_per_query,
+        "num_queries_requested": args.max_queries,
+        "num_queries_without_positive_in_db": skipped_no_positive,
+        "seed": args.seed,
+        "synthetic_smoke": bool(args.synthetic_smoke),
+        "query_source": args.query_source,
+        "db_self_eval_per_id": args.db_self_eval_per_id,
+        "same_dataset_only": bool(not args.cross_dataset_candidates),
+        "visualize_per_dataset": args.visualize_per_dataset,
+        "visualize_max_matches": args.visualize_max_matches,
+        "roma_variant": args.roma_variant if args.matcher == "roma" else None,
+        "roma_cert_threshold": args.roma_cert_threshold if args.matcher == "roma" else None,
+        "roma_score_mode": args.roma_score_mode if args.matcher == "roma" else None,
+        "roma_coarse_res": args.roma_coarse_res if args.matcher == "roma" else None,
+        "roma_upsample_res": args.roma_upsample_res if args.matcher == "roma" else None,
+    }
+
+    if args.ab_test:
+        if args.matcher != "aliked":
+            print("[Error] --ab-test is currently supported only with --matcher aliked.")
+            return 1
+        try:
+            variants = parse_ab_variants(args.ab_variants)
+        except Exception as exc:
+            print(f"[Error] Invalid --ab-variants: {exc}")
+            return 1
+
+        print(f"[Info] A/B variants: {', '.join(variants)}")
+        try:
+            pair_matches = matcher.collect_pair_matches(unique_pairs)
+        except Exception as exc:
+            print(f"[Error] Collecting pair matches for A/B failed: {exc}")
+            return 1
+
+        score_maps = build_aliked_ab_score_maps(
+            pair_matches=pair_matches,
+            confidence_threshold=args.confidence_threshold,
+            min_geom_matches=args.ab_min_geom_matches,
+            ransac_reproj_threshold=args.ab_ransac_reproj_threshold,
+            ransac_confidence=args.ab_ransac_confidence,
+            ransac_max_iters=args.ab_ransac_max_iters,
+            coverage_weight=args.ab_coverage_weight,
+            coverage_ref_size=args.ab_coverage_ref_size,
+        )
+
+        variant_results: dict[str, pd.DataFrame] = {}
+        comparison_rows: list[dict[str, Any]] = []
+        all_summaries: list[dict[str, Any]] = []
+
+        for variant in variants:
+            if variant == "two_stage":
+                results_df_variant = evaluate_scenarios_two_stage(
+                    scenarios=scenarios,
+                    db_dataset=db_dataset,
+                    stage1_score_map=score_maps["baseline"],
+                    stage2_score_map=score_maps["geom_cov"],
+                    topk=args.ab_two_stage_topk,
+                )
+            else:
+                results_df_variant = evaluate_scenarios(
+                    scenarios=scenarios,
+                    db_dataset=db_dataset,
+                    pair_score_map=score_maps[variant],
+                )
+
+            results_df_variant["ab_variant"] = variant
+            summary_variant = summarize_results(
+                results_df_variant,
+                meta={
+                    **base_meta,
+                    "ab_test": True,
+                    "ab_variant": variant,
+                    "ab_variants": variants,
+                    "ab_two_stage_topk": args.ab_two_stage_topk,
+                    "ab_min_geom_matches": args.ab_min_geom_matches,
+                    "ab_ransac_reproj_threshold": args.ab_ransac_reproj_threshold,
+                    "ab_ransac_confidence": args.ab_ransac_confidence,
+                    "ab_ransac_max_iters": args.ab_ransac_max_iters,
+                    "ab_coverage_weight": args.ab_coverage_weight,
+                    "ab_coverage_ref_size": args.ab_coverage_ref_size,
+                },
+            )
+
+            print(f"\n=== A/B Variant: {variant} ===")
+            print_summary(summary_variant)
+            csv_path, json_path = save_outputs(
+                results_df_variant,
+                summary_variant,
+                results_dir=Path(args.results_dir),
+                run_prefix=f"{args.run_prefix}_{variant}",
+            )
+            print(f"[Saved] Detail CSV ({variant}): {csv_path}")
+            print(f"[Saved] Summary JSON ({variant}): {json_path}")
+
+            variant_results[variant] = results_df_variant
+            all_summaries.append(summary_variant)
+            comparison_rows.append(
+                {
+                    "variant": variant,
+                    "top1_accuracy": summary_variant.get("top1_accuracy"),
+                    "avg_gt_rank": summary_variant.get("avg_gt_rank"),
+                    "num_scenarios": summary_variant.get("num_scenarios"),
+                }
+            )
+
+        comparison_df = pd.DataFrame(comparison_rows).sort_values(
+            ["top1_accuracy", "avg_gt_rank"], ascending=[False, True]
+        )
+        comp_csv, comp_json = save_ab_comparison(
+            comparison_df=comparison_df,
+            all_summaries=all_summaries,
+            results_dir=Path(args.results_dir),
+            run_prefix=args.run_prefix,
+        )
+        print("\n=== A/B Comparison ===")
+        for _, row in comparison_df.iterrows():
+            print(
+                f"  - {row['variant']}: top1={row['top1_accuracy']}, "
+                f"avg_gt_rank={row['avg_gt_rank']}, n={int(row['num_scenarios'])}"
+            )
+        print(f"[Saved] A/B comparison CSV: {comp_csv}")
+        print(f"[Saved] A/B comparison JSON: {comp_json}")
+
+        if args.visualize_per_dataset > 0 and len(variant_results) > 0:
+            vis_variant = args.ab_visualize_variant
+            if vis_variant == "best":
+                vis_variant = str(comparison_df.iloc[0]["variant"])
+            if vis_variant != "none":
+                if vis_variant not in variant_results:
+                    print(f"[Warn] Visualization skipped: variant '{vis_variant}' was not executed.")
+                else:
+                    if args.visualize_dir is None:
+                        vis_dir = Path(args.results_dir) / "visualizations" / f"{args.run_prefix}_{vis_variant}"
+                    else:
+                        vis_dir = Path(args.visualize_dir)
+                    saved_paths = generate_match_visualizations(
+                        results_df=variant_results[vis_variant],
+                        query_dataset=query_dataset,
+                        db_dataset=db_dataset,
+                        matcher=matcher,
+                        matcher_name=f"{args.matcher}:{vis_variant}",
+                        output_dir=vis_dir,
+                        per_dataset=args.visualize_per_dataset,
+                        max_matches=args.visualize_max_matches,
+                    )
+                    print(f"[Saved] Visualizations ({vis_variant}): {len(saved_paths)} files -> {vis_dir}")
+        return 0
+
     try:
         unique_scores = matcher.score_pairs(unique_pairs)
     except Exception as exc:
@@ -1382,29 +1858,7 @@ def main():
     pair_score_map = {pair: float(score) for pair, score in zip(unique_pairs, unique_scores)}
 
     results_df = evaluate_scenarios(scenarios, db_dataset=db_dataset, pair_score_map=pair_score_map)
-    summary = summarize_results(
-        results_df,
-        meta={
-            "matcher": args.matcher,
-            "device": device,
-            "candidate_size": args.candidate_size,
-            "trials_per_query": args.trials_per_query,
-            "num_queries_requested": args.max_queries,
-            "num_queries_without_positive_in_db": skipped_no_positive,
-            "seed": args.seed,
-            "synthetic_smoke": bool(args.synthetic_smoke),
-            "query_source": args.query_source,
-            "db_self_eval_per_id": args.db_self_eval_per_id,
-            "same_dataset_only": bool(not args.cross_dataset_candidates),
-            "visualize_per_dataset": args.visualize_per_dataset,
-            "visualize_max_matches": args.visualize_max_matches,
-            "roma_variant": args.roma_variant if args.matcher == "roma" else None,
-            "roma_cert_threshold": args.roma_cert_threshold if args.matcher == "roma" else None,
-            "roma_score_mode": args.roma_score_mode if args.matcher == "roma" else None,
-            "roma_coarse_res": args.roma_coarse_res if args.matcher == "roma" else None,
-            "roma_upsample_res": args.roma_upsample_res if args.matcher == "roma" else None,
-        },
-    )
+    summary = summarize_results(results_df, meta=base_meta)
     print_summary(summary)
 
     if args.visualize_per_dataset > 0:

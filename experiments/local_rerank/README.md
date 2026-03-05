@@ -33,6 +33,7 @@ You can override defaults with env vars:
 Default behavior:
 - If neither `MATCHERS` nor `MATCHER` is set, `run_local_rerank_gpu.sh` runs all:
   `aliked`, `loftr`, `orb`
+- 단, extra args에 `--ab-test`가 포함되면 기본 matcher는 자동으로 `aliked`만 실행
 - Each matcher uses its own prefix: `${RUN_PREFIX}_<matcher>`
   so CSV/JSON are saved separately.
 - Match-point visualization is enabled by default with:
@@ -58,6 +59,28 @@ If `query` labels in `metadata.csv` do not overlap with `database` labels
 - `loftr`: LoFTR matcher
 - `roma`: RoMA dense matcher (`romatch`, outdoor/indoor pretrained)
 - `orb`: OpenCV ORB local matcher (no pretrained weights, useful for offline smoke tests)
+
+## ALIKED A/B test mode
+
+`run_local_rerank.py` supports built-in A/B variants on the same scenario set:
+- `baseline`: 기존 방식 (confidence threshold 초과 매칭점 개수)
+- `geom`: 기하 검증(F-matrix inlier) 기반 점수
+- `geom_cov`: `geom` + 공간 커버리지 보정
+- `two_stage`: stage1=`baseline` top-K를 stage2=`geom_cov`로 재정렬
+
+핵심 인자:
+- `--ab-test`
+- `--ab-variants baseline,geom,geom_cov,two_stage`
+- `--ab-two-stage-topk` (default: `5`)
+- `--ab-min-geom-matches` (default: `8`)
+- `--ab-ransac-reproj-threshold` (default: `1.5`)
+- `--ab-coverage-weight` (default: `0.3`)
+
+A/B 실행 시 variant별 상세 CSV/JSON과 비교표가 함께 저장됨:
+- `<run_prefix>_<variant>_*_detail.csv`
+- `<run_prefix>_<variant>_*_summary.json`
+- `<run_prefix>_*_ab_comparison.csv`
+- `<run_prefix>_*_ab_comparison.json`
 
 RoMA-specific CLI options:
 - `--roma-variant {outdoor,indoor}` (default: `outdoor`)
@@ -97,6 +120,18 @@ experiments/local_rerank/run_local_rerank_gpu.sh /path/to/animal-clef-2025 \
   --max-queries 100 \
   --roma-variant outdoor \
   --roma-score-mode sum_above
+```
+
+ALIKED A/B example:
+
+```bash
+MATCHERS="aliked" \
+PYTHON_BIN=/opt/anaconda3/envs/animal_reid/bin/python \
+experiments/local_rerank/run_local_rerank_gpu.sh /path/to/animal-clef-2025 \
+  --ab-test \
+  --ab-variants baseline,geom,geom_cov,two_stage \
+  --ab-two-stage-topk 5 \
+  --max-queries 300
 ```
 
 To allow cross-species candidate sampling (not recommended):
